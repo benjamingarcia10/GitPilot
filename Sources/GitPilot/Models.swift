@@ -1,5 +1,13 @@
 import Foundation
 
+/// Whether we have working GitHub credentials.
+/// `unknown` is the bootstrap state before the first auth check completes.
+enum AuthStatus: Equatable {
+    case unknown
+    case authenticated(login: String)
+    case needsReauth(reason: String)
+}
+
 /// Status of a single CI check or status context on a PR.
 enum CheckState: String, Codable {
     case success = "SUCCESS"

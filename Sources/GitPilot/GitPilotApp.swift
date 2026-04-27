@@ -45,24 +45,25 @@ private struct MenuContent: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("GitPilot").font(.headline)
+                if case .authenticated(let login) = state.authStatus {
+                    Text("@\(login)").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Refresh") {
                     Task { await monitor.refresh() }
                 }
                 .buttonStyle(.borderless)
+                .disabled(state.authStatus != authenticatedShape(state.authStatus))
             }
             Divider()
 
-            if let err = monitor.lastError {
-                Text(err).foregroundStyle(.red).font(.caption)
-            }
-
-            if monitor.prs.isEmpty {
-                Text("No open PRs").foregroundStyle(.secondary)
-            } else {
-                ForEach(monitor.prs) { pr in
-                    PRRow(pr: pr, state: state)
-                }
+            switch state.authStatus {
+            case .unknown:
+                Text("Checking GitHub auth…").foregroundStyle(.secondary)
+            case .needsReauth(let reason):
+                AuthBanner(reason: reason, onRetry: { Task { await state.checkAuth() } })
+            case .authenticated:
+                authenticatedBody
             }
 
             Divider()
@@ -80,10 +81,70 @@ private struct MenuContent: View {
         .task { await state.bootstrap() }
     }
 
+    @ViewBuilder
+    private var authenticatedBody: some View {
+        if let err = monitor.lastError {
+            Text(err).foregroundStyle(.red).font(.caption)
+        }
+        if monitor.prs.isEmpty {
+            Text("No open PRs").foregroundStyle(.secondary)
+        } else {
+            ForEach(monitor.prs) { pr in
+                PRRow(pr: pr, state: state)
+            }
+        }
+    }
+
+    /// Helper so the disabled-binding above type-checks; SwiftUI doesn't like
+    /// pattern matching inside a boolean expression directly.
+    private func authenticatedShape(_ status: AuthStatus) -> AuthStatus {
+        if case .authenticated = status { return status }
+        return .unknown
+    }
+
     private func relative(_ date: Date) -> String {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .abbreviated
         return f.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+private struct AuthBanner: View {
+    let reason: String
+    let onRetry: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("GitHub sign-in required", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.subheadline.weight(.semibold))
+            Text(reason).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+            Text("Run this in a terminal:").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+            HStack(spacing: 6) {
+                Text("gh auth login")
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                Button("Copy") {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString("gh auth login", forType: .string)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+            }
+            HStack {
+                Spacer()
+                Button("I've signed in — retry", action: onRetry)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(.top, 4)
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 

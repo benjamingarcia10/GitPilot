@@ -26,6 +26,10 @@ final class PRMonitor: ObservableObject {
     /// Set by AppState after construction so the closure can reference `self`.
     var onTransition: (PRTransition) async -> Void = { _ in }
 
+    /// Called when refresh hits an auth error. AppState uses this to flip authStatus
+    /// and stop the loop so we don't hammer GitHub with a stale token.
+    var onAuthError: (String) -> Void = { _ in }
+
     init(client: GitHubClient, pollInterval: TimeInterval = 30) {
         self.client = client
         self.pollInterval = pollInterval
@@ -80,6 +84,10 @@ final class PRMonitor: ObservableObject {
             prs = fresh
             lastError = nil
             lastRefresh = Date()
+        } catch let err as GitHubClientError where err.isAuthError {
+            // Don't keep polling with bad creds; AppState will surface a banner.
+            stop()
+            onAuthError(err.localizedDescription)
         } catch {
             lastError = error.localizedDescription
         }

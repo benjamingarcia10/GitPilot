@@ -19,13 +19,30 @@ enum GitHubClientError: Error, LocalizedError {
             return "Failed to decode GitHub response: \(msg)"
         }
     }
+
+    /// True when the right user response is "run `gh auth login`", not "report a bug".
+    var isAuthError: Bool {
+        switch self {
+        case .authMissing:
+            return true
+        case .requestFailed(let code, _):
+            return code == 401
+        case .ghCLIFailed(let msg):
+            let m = msg.lowercased()
+            return m.contains("not logged") || m.contains("authentication") || m.contains("auth status")
+        case .decodingFailed:
+            return false
+        }
+    }
 }
 
 /// Talks to GitHub. Auth via the `gh` CLI (it manages the token store).
-/// PRs are fetched with GraphQL so we get mergeStateStatus in one round trip;
-/// REST is used for the update-branch action.
+/// PRs are fetched with GraphQL so we get mergeStateStatus in one round trip.
+/// Login + token are cached for the lifetime of the process; cleared on auth failure.
 actor GitHubClient {
     private let session: URLSession
+    private var cachedToken: String?
+    private var cachedLogin: String?
 
     init(session: URLSession = .shared) {
         self.session = session
@@ -33,11 +50,34 @@ actor GitHubClient {
 
     // MARK: - Auth
 
-    /// Reads the user's gh CLI token. Avoids us managing OAuth ourselves.
+    /// Reads the user's gh CLI token, caching it. Reset on any 401.
     private func token() throws -> String {
+        if let cached = cachedToken { return cached }
+        let value = try runGH(args: ["auth", "token"])
+        guard !value.isEmpty else { throw GitHubClientError.authMissing }
+        cachedToken = value
+        return value
+    }
+
+    /// Returns the authenticated GitHub username. Cached for the process lifetime —
+    /// login does not change between launches without a re-auth.
+    func currentLogin() throws -> String {
+        if let cached = cachedLogin { return cached }
+        let value = try runGH(args: ["api", "user", "--jq", ".login"])
+        cachedLogin = value
+        return value
+    }
+
+    /// Cleared on 401 so the next call re-fetches.
+    private func invalidateAuth() {
+        cachedToken = nil
+        cachedLogin = nil
+    }
+
+    private func runGH(args: [String]) throws -> String {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["gh", "auth", "token"]
+        proc.arguments = ["gh"] + args
         let out = Pipe()
         let err = Pipe()
         proc.standardOutput = out
@@ -49,21 +89,6 @@ actor GitHubClient {
             let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             throw GitHubClientError.ghCLIFailed(msg)
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !token.isEmpty else { throw GitHubClientError.authMissing }
-        return token
-    }
-
-    /// Returns the authenticated GitHub username, used to scope PR queries.
-    func currentLogin() throws -> String {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["gh", "api", "user", "--jq", ".login"]
-        let out = Pipe()
-        proc.standardOutput = out
-        try proc.run()
-        proc.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
@@ -196,6 +221,10 @@ actor GitHubClient {
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw GitHubClientError.requestFailed(-1, "no http response")
+        }
+        if http.statusCode == 401 {
+            // Cached token is stale; drop it so the next attempt re-reads from gh.
+            invalidateAuth()
         }
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""

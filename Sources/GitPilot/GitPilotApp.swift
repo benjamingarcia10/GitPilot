@@ -87,7 +87,13 @@ private struct MenuContent: View {
             Divider()
             HStack {
                 if let last = monitor.lastRefresh {
-                    Text("Updated \(relative(last))").font(.caption).foregroundStyle(.secondary)
+                    // Wrap in TimelineView so the "Xs ago" string re-evaluates against
+                    // wall-clock time. Without this, SwiftUI never re-renders the label.
+                    TimelineView(.periodic(from: .now, by: 5)) { context in
+                        Text("Updated \(relative(last, now: context.date))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
@@ -123,10 +129,12 @@ private struct MenuContent: View {
         return .unknown
     }
 
-    private func relative(_ date: Date) -> String {
+    /// `now` is passed in so the string re-evaluates against the TimelineView's tick,
+    /// not a captured `Date()` from when the view was first laid out.
+    private func relative(_ date: Date, now: Date) -> String {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .abbreviated
-        return f.localizedString(for: date, relativeTo: Date())
+        return f.localizedString(for: date, relativeTo: now)
     }
 }
 

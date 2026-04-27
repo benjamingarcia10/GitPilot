@@ -21,13 +21,17 @@ The first launch will ask for notification permission. Allow it.
 
 ## Develop
 
+Three options, fastest to most production-like:
+
 ```bash
-swift build           # debug build, fast
-swift run gitpilot    # run in-place (notifications work but action buttons may not)
-./scripts/build-app.sh && open GitPilot.app   # full bundle, action buttons work
+swift run gitpilot             # debug build, ~1s incremental. Action buttons may not work.
+./scripts/build-app.sh         # full bundle. Quit + open GitPilot.app to relaunch.
+./scripts/dev.sh               # watch + auto-rebuild + relaunch + tee stderr. Ctrl+C to stop.
 ```
 
-For action buttons on notifications to work, you need the bundled `.app`. The plain `swift run` binary works for the menu bar UI but not the rich notification UX.
+`dev.sh` is the recommended dev loop: it polls `Sources/` and `scripts/` for changes, rebuilds the bundle, relaunches the app, and tees timing logs to your terminal so you can see what's slow.
+
+Action buttons on notifications require a code-signed bundle, so `swift run` is fine for menu UI iteration but not the full notification UX.
 
 ## How it works
 

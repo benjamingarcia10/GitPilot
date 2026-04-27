@@ -13,6 +13,10 @@ final class AppState: ObservableObject {
     /// monitor's onAuthError callback when polling hits a 401.
     @Published var authStatus: AuthStatus = .unknown
 
+    /// Selected repo filter for the menu. `nil` means "All".
+    /// Filtering is purely UI; the monitor still polls + enriches every PR.
+    @Published var repoFilter: String? = nil
+
     /// SwiftUI's `.task` modifier re-fires when the menu popover reappears.
     /// Without this guard, every open would kick off a fresh fetch and blank the list.
     private var didBootstrap = false
@@ -37,6 +41,18 @@ final class AppState: ObservableObject {
         didBootstrap = true
         await notifications.bootstrap()
         await checkAuth()
+    }
+
+    /// Sorted unique `owner/name` keys present in the current PR set, for the filter picker.
+    var availableRepos: [String] {
+        let keys = monitor.prs.map { "\($0.repoOwner)/\($0.repoName)" }
+        return Array(Set(keys)).sorted()
+    }
+
+    /// PRs to display, after applying the active repo filter.
+    var visiblePRs: [PullRequest] {
+        guard let filter = repoFilter else { return monitor.prs }
+        return monitor.prs.filter { "\($0.repoOwner)/\($0.repoName)" == filter }
     }
 
     /// Validates credentials by reading the user's login. Starts the monitor only on success.

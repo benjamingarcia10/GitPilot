@@ -55,6 +55,24 @@ private struct MenuContent: View {
                 .buttonStyle(.borderless)
                 .disabled(state.authStatus != authenticatedShape(state.authStatus))
             }
+
+            if case .authenticated = state.authStatus, !state.availableRepos.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Repo").font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { state.repoFilter ?? "" },
+                        set: { state.repoFilter = $0.isEmpty ? nil : $0 }
+                    )) {
+                        Text("All (\(state.monitor.prs.count))").tag("")
+                        ForEach(state.availableRepos, id: \.self) { repo in
+                            let count = state.monitor.prs.filter { "\($0.repoOwner)/\($0.repoName)" == repo }.count
+                            Text("\(repo) (\(count))").tag(repo)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+            }
             Divider()
 
             switch state.authStatus {
@@ -86,10 +104,13 @@ private struct MenuContent: View {
         if let err = monitor.lastError {
             Text(err).foregroundStyle(.red).font(.caption)
         }
+        let visible = state.visiblePRs
         if monitor.prs.isEmpty {
             Text("No open PRs").foregroundStyle(.secondary)
+        } else if visible.isEmpty {
+            Text("No PRs in this repo").foregroundStyle(.secondary)
         } else {
-            ForEach(monitor.prs) { pr in
+            ForEach(visible) { pr in
                 PRRow(pr: pr, state: state)
             }
         }

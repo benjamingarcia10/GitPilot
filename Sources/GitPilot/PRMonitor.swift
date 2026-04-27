@@ -1,13 +1,8 @@
 import Foundation
 
-/// Distinct events the monitor emits when a PR's state crosses a threshold.
-enum PRTransition {
-    case needsBranchUpdate(PullRequest)   // PR has fallen behind base.
-    case readyToMerge(PullRequest)        // PR has entered the merge window.
-}
-
-/// Polls GitHub on an interval, diffs state, and emits transition events.
-/// Edge-triggered: emits only on state change so we don't spam notifications.
+/// Polls GitHub on an interval and exposes the current PR snapshot.
+/// Pure fetcher: no dedupe, no snooze, no pin logic. AppState owns those —
+/// PRMonitor just emits per-PR enrichment events and post-refresh list snapshots.
 @MainActor
 final class PRMonitor: ObservableObject {
     @Published private(set) var prs: [PullRequest] = []
@@ -17,29 +12,33 @@ final class PRMonitor: ObservableObject {
     /// in the menu and disables the refresh button to prevent spam-clicking.
     @Published private(set) var isRefreshing: Bool = false
 
-    /// Set of PR ids we've already notified for each transition kind, so we don't re-fire
-    /// on every poll while the PR sits in that state. Cleared when the PR leaves the state.
-    private var notifiedNeedsUpdate: Set<String> = []
-    private var notifiedReadyToMerge: Set<String> = []
-
     private let client: GitHubClient
-    private let pollInterval: TimeInterval
+    private(set) var pollInterval: TimeInterval
     private var task: Task<Void, Never>?
 
-    /// Set by AppState after construction so the closure can reference `self`.
-    var onTransition: (PRTransition) async -> Void = { _ in }
+    /// Called immediately before each refresh starts. AppState uses this to clear
+    /// expired snoozes so the upcoming pass treats those PRs as fresh.
+    var willRefresh: () -> Void = {}
 
-    /// Called when refresh hits an auth error. AppState uses this to flip authStatus
-    /// and stop the loop so we don't hammer GitHub with a stale token.
-    var onAuthError: (String) -> Void = { _ in }
+    /// Called after each per-PR enrichment is applied. AppState computes transitions,
+    /// fires notifications, and runs auto-rebase logic in this callback.
+    var onPRUpdated: (PullRequest) async -> Void = { _ in }
+
+    /// Called once after a refresh completes, with the set of currently-live PR ids.
+    /// AppState uses this to drop dedupe entries for PRs that closed/merged.
+    var onListSettled: (Set<String>) -> Void = { _ in }
 
     init(client: GitHubClient, pollInterval: TimeInterval = 30) {
         self.client = client
         self.pollInterval = pollInterval
     }
 
+    func setPollInterval(_ interval: TimeInterval) {
+        pollInterval = interval
+    }
+
     func start() {
-        // No-op if already running — protects against menu-open re-bootstrap kicking off duplicate fetches.
+        // No-op if already running — guards menu-open re-bootstrap from kicking off duplicate fetches.
         if let existing = task, !existing.isCancelled { return }
         task = Task { [weak self] in
             guard let self else { return }
@@ -58,12 +57,14 @@ final class PRMonitor: ObservableObject {
     /// Two-phase refresh:
     ///   1. Fetch the list and publish immediately so the UI shows rows right away.
     ///   2. Enrich each PR in parallel; apply each result as it arrives.
-    /// Transitions are evaluated in phase 2, after a PR has its merge state.
+    /// AppState's onPRUpdated callback runs after each apply, which is where
+    /// transition / notification / auto-rebase decisions are made.
     func refresh() async {
-        // No-op if already refreshing — the UI also disables the button, but defend in depth.
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+
+        willRefresh()
 
         let refreshStart = Date()
         Log.debug("refresh start")
@@ -71,8 +72,7 @@ final class PRMonitor: ObservableObject {
             let lightPRs = try await client.fetchMyOpenPRs()
             Log.debug("phase1 returned \(lightPRs.count) PRs", elapsed: refreshStart)
 
-            // Preserve enrichment from the previous snapshot for any PR we still see —
-            // avoids spinner flicker on PRs whose state hasn't changed.
+            // Carry enrichment from the previous snapshot so rows don't flash to "loading".
             let previousById = Dictionary(uniqueKeysWithValues: prs.map { ($0.id, $0) })
             prs = lightPRs.map { fresh in
                 guard let prev = previousById[fresh.id] else { return fresh }
@@ -80,15 +80,13 @@ final class PRMonitor: ObservableObject {
                 merged.mergeable = prev.mergeable
                 merged.mergeStateStatus = prev.mergeStateStatus
                 merged.reviewDecision = prev.reviewDecision
+                merged.checkRollupState = prev.checkRollupState
+                merged.checks = prev.checks
+                // allowedMergeMethods comes from the fresh phase-1 query, no carry-forward needed.
                 return merged
             }
             lastError = nil
             lastRefresh = Date()
-
-            // Drop notification state for PRs that are no longer in the list.
-            let liveIds = Set(lightPRs.map { $0.id })
-            notifiedNeedsUpdate.formIntersection(liveIds)
-            notifiedReadyToMerge.formIntersection(liveIds)
 
             // Enrich in parallel. Each task awaits one cheap GraphQL call and updates one row.
             let enrichStart = Date()
@@ -110,6 +108,9 @@ final class PRMonitor: ObservableObject {
             }
             Log.debug("phase2 enrichment complete", elapsed: enrichStart)
             Log.debug("refresh total", elapsed: refreshStart)
+
+            // Post-refresh: tell AppState which ids are still live so it can clean dedupe sets.
+            onListSettled(Set(lightPRs.map { $0.id }))
         } catch let err as GitHubClientError where err.isAuthError {
             stop()
             onAuthError(err.localizedDescription)
@@ -118,34 +119,23 @@ final class PRMonitor: ObservableObject {
         }
     }
 
-    /// Apply an enrichment result to the matching PR and re-evaluate its transitions.
+    /// Apply an enrichment result to the matching PR, then notify AppState.
     private func applyEnrichment(prId: String, enrichment: PREnrichment) async {
         guard let idx = prs.firstIndex(where: { $0.id == prId }) else { return }
         var pr = prs[idx]
         pr.mergeable = enrichment.mergeable
         pr.mergeStateStatus = enrichment.mergeStateStatus
         pr.reviewDecision = enrichment.reviewDecision
+        pr.checkRollupState = enrichment.checkRollupState
+        pr.checks = enrichment.checks
         prs[idx] = pr
-
-        // Edge-triggered transition checks for just this PR.
-        if pr.needsBranchUpdate {
-            if !notifiedNeedsUpdate.contains(pr.id) {
-                notifiedNeedsUpdate.insert(pr.id)
-                await onTransition(.needsBranchUpdate(pr))
-            }
-        } else {
-            notifiedNeedsUpdate.remove(pr.id)
-        }
-
-        if pr.isReadyToMerge {
-            if !notifiedReadyToMerge.contains(pr.id) {
-                notifiedReadyToMerge.insert(pr.id)
-                await onTransition(.readyToMerge(pr))
-            }
-        } else {
-            notifiedReadyToMerge.remove(pr.id)
-        }
+        await onPRUpdated(pr)
     }
+
+    // MARK: - Auth error plumbing
+
+    /// Set by AppState; flips authStatus and stops the loop on 401.
+    var onAuthError: (String) -> Void = { _ in }
 
     private func handleAuthError(_ reason: String) {
         stop()

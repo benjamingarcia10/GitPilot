@@ -5,6 +5,8 @@ import UserNotifications
 enum NotificationCategory {
     static let needsUpdate = "GP_NEEDS_UPDATE"
     static let readyToMerge = "GP_READY_TO_MERGE"
+    static let testsFailing = "GP_TESTS_FAILING"
+    static let autoRebaseFailed = "GP_AUTO_REBASE_FAILED"
 }
 
 enum NotificationAction {
@@ -21,9 +23,13 @@ enum NotificationResponse {
 }
 
 /// Wraps UNUserNotificationCenter. Categories with action buttons are registered once at launch.
-final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
+final class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     private let center = UNUserNotificationCenter.current()
     private let onResponse: (NotificationResponse) -> Void
+
+    /// Mirrors UNAuthorizationStatus so the UI can show a banner when notifications
+    /// are denied and silently dropping. Updated after request and on demand.
+    @Published var authorizationStatus: UNAuthorizationStatus = .notDetermined
 
     init(onResponse: @escaping (NotificationResponse) -> Void) {
         self.onResponse = onResponse
@@ -33,12 +39,19 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
     func bootstrap() async {
         do {
-            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
-            if !granted { print("Notification permission denied") }
+            _ = try await center.requestAuthorization(options: [.alert, .sound, .badge])
         } catch {
-            print("Notification authorization error: \(error)")
+            Log.debug("Notification authorization error: \(error)")
         }
         registerCategories()
+        await refreshAuthorizationStatus()
+    }
+
+    @MainActor
+    func refreshAuthorizationStatus() async {
+        let settings = await center.notificationSettings()
+        self.authorizationStatus = settings.authorizationStatus
+        Log.debug("notification authorizationStatus: \(settings.authorizationStatus.rawValue)")
     }
 
     private func registerCategories() {
@@ -71,7 +84,21 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             options: []
         )
 
-        center.setNotificationCategories([needsUpdate, readyToMerge])
+        let testsFailing = UNNotificationCategory(
+            identifier: NotificationCategory.testsFailing,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        let autoRebaseFailed = UNNotificationCategory(
+            identifier: NotificationCategory.autoRebaseFailed,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([needsUpdate, readyToMerge, testsFailing, autoRebaseFailed])
     }
 
     func notifyNeedsUpdate(pr: PullRequest) async {
@@ -94,6 +121,28 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         content.sound = .default
         content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
         await schedule(id: "ready-\(pr.id)", content: content)
+    }
+
+    func notifyTestsFailing(pr: PullRequest) async {
+        let content = UNMutableNotificationContent()
+        content.title = "CI failing"
+        content.subtitle = "PR #\(pr.number)"
+        content.body = pr.title
+        content.categoryIdentifier = NotificationCategory.testsFailing
+        content.sound = .default
+        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
+        await schedule(id: "tests-\(pr.id)", content: content)
+    }
+
+    func notifyAutoRebaseFailed(pr: PullRequest, reason: String) async {
+        let content = UNMutableNotificationContent()
+        content.title = "Auto-rebase failed"
+        content.subtitle = "PR #\(pr.number)"
+        content.body = "\(pr.title)\n\(reason)"
+        content.categoryIdentifier = NotificationCategory.autoRebaseFailed
+        content.sound = .default
+        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
+        await schedule(id: "auto-rebase-failed-\(pr.id)", content: content)
     }
 
     private func schedule(id: String, content: UNMutableNotificationContent) async {

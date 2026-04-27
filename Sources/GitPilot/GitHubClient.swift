@@ -119,7 +119,13 @@ actor GitHubClient {
                 headRefName
                 baseRefName
                 isDraft
-                repository { name owner { login } }
+                repository {
+                  name
+                  owner { login }
+                  mergeCommitAllowed
+                  squashMergeAllowed
+                  rebaseMergeAllowed
+                }
               }
             }
           }
@@ -149,6 +155,9 @@ actor GitHubClient {
                 struct Repo: Decodable {
                     let name: String
                     let owner: Owner
+                    let mergeCommitAllowed: Bool?
+                    let squashMergeAllowed: Bool?
+                    let rebaseMergeAllowed: Bool?
                     struct Owner: Decodable { let login: String }
                 }
             }
@@ -158,7 +167,11 @@ actor GitHubClient {
         do {
             let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
             return decoded.data.viewer.pullRequests.nodes.map { node in
-                PullRequest(
+                var allowed: Set<String> = []
+                if node.repository.mergeCommitAllowed == true { allowed.insert("MERGE") }
+                if node.repository.squashMergeAllowed == true { allowed.insert("SQUASH") }
+                if node.repository.rebaseMergeAllowed == true { allowed.insert("REBASE") }
+                return PullRequest(
                     nodeId: node.id,
                     number: node.number,
                     title: node.title,
@@ -170,7 +183,8 @@ actor GitHubClient {
                     repoName: node.repository.name,
                     mergeable: nil,
                     mergeStateStatus: nil,
-                    reviewDecision: nil
+                    reviewDecision: nil,
+                    allowedMergeMethods: allowed
                 )
             }
         } catch {
@@ -179,7 +193,24 @@ actor GitHubClient {
     }
 
     /// Phase 2: per-PR enrichment with the slow fields. Run these in parallel from the caller.
+    /// Retries on UNKNOWN: GitHub computes mergeStateStatus lazily, so the first call
+    /// kicks off computation and returns UNKNOWN; later calls (within seconds) return
+    /// the real value. We back off 0.5s, 1s, 2s — at most 4 attempts.
     func enrichPR(nodeId: String) async throws -> PREnrichment {
+        var attempt = 0
+        while true {
+            attempt += 1
+            let result = try await enrichPROnce(nodeId: nodeId)
+            if result.mergeStateStatus != .unknown || attempt >= 4 {
+                return result
+            }
+            let delayMs: UInt64 = [500, 1_000, 2_000][min(attempt - 1, 2)]
+            Log.debug("enrichPR \(nodeId.suffix(8)) UNKNOWN, retrying in \(delayMs)ms (attempt \(attempt))")
+            try await Task.sleep(nanoseconds: delayMs * 1_000_000)
+        }
+    }
+
+    private func enrichPROnce(nodeId: String) async throws -> PREnrichment {
         let query = """
         query($id: ID!) {
           node(id: $id) {
@@ -187,6 +218,34 @@ actor GitHubClient {
               mergeable
               mergeStateStatus
               reviewDecision
+              commits(last: 1) {
+                nodes {
+                  commit {
+                    statusCheckRollup {
+                      state
+                      contexts(first: 50) {
+                        nodes {
+                          __typename
+                          ... on CheckRun {
+                            id
+                            name
+                            conclusion
+                            status
+                            detailsUrl
+                            permalink
+                          }
+                          ... on StatusContext {
+                            id
+                            context
+                            state
+                            targetUrl
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -202,6 +261,39 @@ actor GitHubClient {
                 let mergeable: String?
                 let mergeStateStatus: String?
                 let reviewDecision: String?
+                let commits: Commits?
+                struct Commits: Decodable {
+                    let nodes: [CommitNode]
+                    struct CommitNode: Decodable {
+                        let commit: Commit
+                        struct Commit: Decodable {
+                            let statusCheckRollup: Rollup?
+                            struct Rollup: Decodable {
+                                let state: String?
+                                let contexts: Contexts?
+                                struct Contexts: Decodable {
+                                    let nodes: [ContextNode]
+                                }
+                                /// Discriminated union: GraphQL response uses __typename
+                                /// to distinguish CheckRun vs StatusContext.
+                                struct ContextNode: Decodable {
+                                    let __typename: String
+                                    let id: String
+                                    // CheckRun fields
+                                    let name: String?
+                                    let conclusion: String?
+                                    let status: String?
+                                    let detailsUrl: URL?
+                                    let permalink: URL?
+                                    // StatusContext fields
+                                    let context: String?
+                                    let state: String?
+                                    let targetUrl: URL?
+                                }
+                            }
+                        }
+                    }
+                }
             }
             let data: Data
         }
@@ -211,13 +303,49 @@ actor GitHubClient {
             guard let node = decoded.data.node else {
                 throw GitHubClientError.decodingFailed("missing node for \(nodeId)")
             }
+            let rollup = node.commits?.nodes.first?.commit.statusCheckRollup
+            let rollupRaw = rollup?.state ?? "UNKNOWN"
+            let checks: [PRCheck] = (rollup?.contexts?.nodes ?? []).map { node in
+                if node.__typename == "CheckRun" {
+                    // CheckRun's "state" comes from conclusion (when finished) or status (when in flight).
+                    let stateRaw = (node.conclusion ?? node.status ?? "UNKNOWN").uppercased()
+                    return PRCheck(
+                        id: node.id,
+                        name: node.name ?? "(unnamed check)",
+                        state: mapCheckRunState(stateRaw),
+                        url: node.detailsUrl ?? node.permalink
+                    )
+                } else {
+                    // StatusContext: classic commit status, "context" is the name.
+                    return PRCheck(
+                        id: node.id,
+                        name: node.context ?? "(status)",
+                        state: CheckRollupState(rawValue: node.state ?? "UNKNOWN") ?? .unknown,
+                        url: node.targetUrl
+                    )
+                }
+            }
             return PREnrichment(
                 mergeable: node.mergeable ?? "UNKNOWN",
                 mergeStateStatus: MergeStateStatus(rawValue: node.mergeStateStatus ?? "UNKNOWN") ?? .unknown,
-                reviewDecision: node.reviewDecision
+                reviewDecision: node.reviewDecision,
+                checkRollupState: CheckRollupState(rawValue: rollupRaw) ?? .unknown,
+                checks: checks
             )
         } catch {
             throw GitHubClientError.decodingFailed(String(describing: error))
+        }
+    }
+
+    /// Bridge CheckRun's flat enum (conclusion or status) into our common rollup state.
+    private nonisolated func mapCheckRunState(_ raw: String) -> CheckRollupState {
+        switch raw {
+        case "SUCCESS", "NEUTRAL", "SKIPPED": return .success
+        case "FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED": return .failure
+        case "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED": return .pending
+        case "ERROR": return .error
+        case "STALE": return .expected
+        default: return .unknown
         }
     }
 
@@ -226,6 +354,23 @@ actor GitHubClient {
     enum UpdateMethod: String {
         case rebase = "REBASE"
         case merge = "MERGE"
+    }
+
+    /// Methods accepted by `enablePullRequestAutoMerge`. The actual allowed set is
+    /// gated by repo settings — the mutation will error if the repo doesn't allow
+    /// the chosen method, and we surface that to the user.
+    enum MergeMethod: String, Codable, CaseIterable {
+        case merge = "MERGE"
+        case squash = "SQUASH"
+        case rebase = "REBASE"
+
+        var label: String {
+            switch self {
+            case .merge:  return "Merge commit"
+            case .squash: return "Squash"
+            case .rebase: return "Rebase"
+            }
+        }
     }
 
     /// Calls the GraphQL `updatePullRequestBranch` mutation. Equivalent to clicking
@@ -252,6 +397,74 @@ actor GitHubClient {
         }
         if let envelope = try? JSONDecoder().decode(GQLEnvelope.self, from: data),
            let errors = envelope.errors, !errors.isEmpty {
+            throw GitHubClientError.requestFailed(200, errors.map(\.message).joined(separator: "; "))
+        }
+        return true
+    }
+
+    // MARK: - Auto-merge
+
+    /// Tells GitHub to merge the PR automatically once branch protection requirements
+    /// are satisfied. Equivalent to clicking "Enable auto-merge" on the PR page.
+    @discardableResult
+    func enableAutoMerge(prNodeId: String, method: MergeMethod) async throws -> Bool {
+        let mutation = """
+        mutation($id: ID!, $method: PullRequestMergeMethod!) {
+          enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: $method }) {
+            pullRequest { autoMergeRequest { enabledAt } }
+          }
+        }
+        """
+        let payload: [String: Any] = [
+            "query": mutation,
+            "variables": ["id": prNodeId, "method": method.rawValue],
+        ]
+        let data = try await graphQL(payload: payload)
+        return try ensureNoGraphQLErrors(data)
+    }
+
+    /// Merges the PR immediately. Used by the client-side auto-merge fallback
+    /// when GitHub-side auto-merge isn't allowed for the repo.
+    @discardableResult
+    func mergePullRequest(prNodeId: String, method: MergeMethod) async throws -> Bool {
+        let mutation = """
+        mutation($id: ID!, $method: PullRequestMergeMethod!) {
+          mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method }) {
+            pullRequest { merged }
+          }
+        }
+        """
+        let payload: [String: Any] = [
+            "query": mutation,
+            "variables": ["id": prNodeId, "method": method.rawValue],
+        ]
+        let data = try await graphQL(payload: payload)
+        return try ensureNoGraphQLErrors(data)
+    }
+
+    /// Cancels auto-merge for the given PR.
+    @discardableResult
+    func disableAutoMerge(prNodeId: String) async throws -> Bool {
+        let mutation = """
+        mutation($id: ID!) {
+          disablePullRequestAutoMerge(input: { pullRequestId: $id }) {
+            pullRequest { autoMergeRequest { enabledAt } }
+          }
+        }
+        """
+        let payload: [String: Any] = ["query": mutation, "variables": ["id": prNodeId]]
+        let data = try await graphQL(payload: payload)
+        return try ensureNoGraphQLErrors(data)
+    }
+
+    /// Throws GitHubClientError.requestFailed when GraphQL returned a 200 with errors.
+    private func ensureNoGraphQLErrors(_ data: Data) throws -> Bool {
+        struct Envelope: Decodable {
+            struct GQLError: Decodable { let message: String }
+            let errors: [GQLError]?
+        }
+        if let env = try? JSONDecoder().decode(Envelope.self, from: data),
+           let errors = env.errors, !errors.isEmpty {
             throw GitHubClientError.requestFailed(200, errors.map(\.message).joined(separator: "; "))
         }
         return true

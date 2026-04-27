@@ -119,6 +119,9 @@ actor GitHubClient {
                 headRefName
                 baseRefName
                 isDraft
+                additions
+                deletions
+                changedFiles
                 repository {
                   name
                   owner { login }
@@ -151,6 +154,9 @@ actor GitHubClient {
                 let headRefName: String
                 let baseRefName: String
                 let isDraft: Bool
+                let additions: Int
+                let deletions: Int
+                let changedFiles: Int
                 let repository: Repo
                 struct Repo: Decodable {
                     let name: String
@@ -181,6 +187,134 @@ actor GitHubClient {
                     isDraft: node.isDraft,
                     repoOwner: node.repository.owner.login,
                     repoName: node.repository.name,
+                    additions: node.additions,
+                    deletions: node.deletions,
+                    changedFiles: node.changedFiles,
+                    mergeable: nil,
+                    mergeStateStatus: nil,
+                    reviewDecision: nil,
+                    allowedMergeMethods: allowed
+                )
+            }
+        } catch {
+            throw GitHubClientError.decodingFailed(String(describing: error))
+        }
+    }
+
+    /// Fetches PRs where the viewer is requested as a reviewer — directly OR via
+    /// a team they belong to. GitHub's `review-requested:@me` filter covers both.
+    /// We also fetch each PR's reviewRequests so we can tell *how* (direct vs team)
+    /// and surface that on the row.
+    func fetchReviewingPRs() async throws -> [PullRequest] {
+        let viewerLogin = try currentLogin()
+        let query = """
+        {
+          search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 25) {
+            nodes {
+              ... on PullRequest {
+                id number title url
+                headRefName baseRefName isDraft
+                additions deletions changedFiles
+                repository {
+                  name
+                  owner { login }
+                  mergeCommitAllowed
+                  squashMergeAllowed
+                  rebaseMergeAllowed
+                }
+                reviewRequests(first: 25) {
+                  nodes {
+                    requestedReviewer {
+                      __typename
+                      ... on User { login }
+                      ... on Team { slug name }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        let t0 = Date()
+        let data = try await graphQL(payload: ["query": query])
+        Log.debug("fetchReviewingPRs", elapsed: t0)
+
+        struct GQLResponse: Decodable {
+            struct Data: Decodable {
+                struct Search: Decodable { let nodes: [PRNode] }
+                let search: Search
+            }
+            struct PRNode: Decodable {
+                let id: String
+                let number: Int
+                let title: String
+                let url: URL
+                let headRefName: String
+                let baseRefName: String
+                let isDraft: Bool
+                let additions: Int
+                let deletions: Int
+                let changedFiles: Int
+                let repository: Repo
+                struct Repo: Decodable {
+                    let name: String
+                    let owner: Owner
+                    let mergeCommitAllowed: Bool?
+                    let squashMergeAllowed: Bool?
+                    let rebaseMergeAllowed: Bool?
+                    struct Owner: Decodable { let login: String }
+                }
+                let reviewRequests: ReviewRequests?
+                struct ReviewRequests: Decodable {
+                    let nodes: [ReviewRequestNode]
+                    struct ReviewRequestNode: Decodable {
+                        let requestedReviewer: Reviewer?
+                        struct Reviewer: Decodable {
+                            let __typename: String
+                            let login: String?
+                            let slug: String?
+                            let name: String?
+                        }
+                    }
+                }
+            }
+            let data: Data
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
+            return decoded.data.search.nodes.map { node in
+                var allowed: Set<String> = []
+                if node.repository.mergeCommitAllowed == true { allowed.insert("MERGE") }
+                if node.repository.squashMergeAllowed == true { allowed.insert("SQUASH") }
+                if node.repository.rebaseMergeAllowed == true { allowed.insert("REBASE") }
+                // Determine why the viewer is on this PR's reviewer list.
+                var sources: [ReviewerSource] = []
+                for req in node.reviewRequests?.nodes ?? [] {
+                    guard let r = req.requestedReviewer else { continue }
+                    if r.__typename == "User", r.login == viewerLogin {
+                        sources.append(ReviewerSource(kind: .direct, teamSlug: nil))
+                    } else if r.__typename == "Team", let slug = r.slug {
+                        // Team-based requests in this result set must include the viewer
+                        // by membership (GitHub's filter wouldn't return otherwise).
+                        sources.append(ReviewerSource(kind: .team, teamSlug: slug))
+                    }
+                }
+                return PullRequest(
+                    nodeId: node.id,
+                    number: node.number,
+                    title: node.title,
+                    url: node.url,
+                    headRefName: node.headRefName,
+                    baseRefName: node.baseRefName,
+                    isDraft: node.isDraft,
+                    repoOwner: node.repository.owner.login,
+                    repoName: node.repository.name,
+                    additions: node.additions,
+                    deletions: node.deletions,
+                    changedFiles: node.changedFiles,
+                    reviewerSources: sources,
                     mergeable: nil,
                     mergeStateStatus: nil,
                     reviewDecision: nil,

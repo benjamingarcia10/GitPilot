@@ -1,5 +1,33 @@
 import Foundation
 
+/// Top-level view in the menu bar popover. Each tab has a distinct data source.
+enum AppTab: String, CaseIterable, Codable, Identifiable {
+    case myPRs       // PRs you authored
+    case reviewing   // PRs where you (or a team you're in) are requested as reviewer
+    case activity    // chronological log of state transitions and your actions
+    case worktrees   // worktrees this app manages
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .myPRs:     return "My PRs"
+        case .reviewing: return "Reviewing"
+        case .activity:  return "Activity"
+        case .worktrees: return "Worktrees"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .myPRs:     return "arrow.triangle.pull"
+        case .reviewing: return "eye"
+        case .activity:  return "clock.arrow.circlepath"
+        case .worktrees: return "folder.badge.gearshape"
+        }
+    }
+}
+
 /// Whether we have working GitHub credentials.
 /// `unknown` is the bootstrap state before the first auth check completes.
 enum AuthStatus: Equatable {

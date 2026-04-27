@@ -2,6 +2,43 @@ import Foundation
 
 /// User-tunable settings, persisted to disk. All defaults match the previous
 /// hard-coded behavior so existing users see no change after the upgrade.
+/// One row in the activity timeline. Recorded as state transitions occur and as
+/// the user takes actions; capped to keep the persisted file small.
+struct ActivityEvent: Codable, Equatable, Identifiable {
+    enum Kind: String, Codable {
+        case becameBehind        // PR transitioned to BEHIND
+        case becameReady         // PR transitioned to CLEAN + APPROVED
+        case becameTestsFailing  // PR transitioned to blockedByTests
+        case becameConflicts     // PR transitioned to merge conflict
+        case rebased             // user-initiated rebase succeeded
+        case autoRebased         // auto-rebase succeeded
+        case autoRebaseFailed    // auto-rebase mutation failed
+        case merged              // client-side merge succeeded
+        case pinned
+        case unpinned
+        case snoozed
+        case unsnoozed
+        case autoMergeEnabled
+        case autoMergeDisabled
+        case appeared            // PR first seen (entered the list)
+        case disappeared         // PR no longer in the list (closed/merged elsewhere)
+    }
+    let id: UUID
+    let timestamp: Date
+    let prId: String
+    let prNumber: Int
+    let prTitle: String
+    let kind: Kind
+    let detail: String?  // optional extra context (e.g. error message on autoRebaseFailed)
+}
+
+/// Caps for the activity log. Surfaced in the Activity tab footer so users know
+/// how far back the history goes.
+enum ActivityRetention {
+    static let maxEntries = 200
+    static let maxAgeDays = 7
+}
+
 /// User-pickable sort orders for the PR list. Persisted across launches.
 /// Pinned PRs always sort to the top regardless of this choice.
 enum PRSortOption: String, Codable, CaseIterable {
@@ -30,6 +67,11 @@ struct PersistedSettings: Codable, Equatable {
     var enableAutoRebaseFailureNotification: Bool = true
     var defaultRepoFilter: String? = nil
     var sortOrder: PRSortOption = .updated
+    /// Root directory for worktrees this app creates. Default expands to
+    /// `~/worktrees/gitpilot`; per-PR worktrees go under <root>/<repo>/<branch>.
+    var worktreeRoot: String = "~/worktrees/gitpilot"
+    /// Preferred editor command. "auto" detects Cursor first, then VSCode, then falls back.
+    var editorCommand: String = "auto"  // "auto" | "code" | "cursor" | "subl" | etc.
 }
 
 /// Single source of truth for everything we keep across launches:
@@ -57,6 +99,11 @@ struct PersistedState: Codable, Equatable {
     /// when set; otherwise the global `settings.autoMergeMethod` default applies
     /// (with a fallback to whatever's allowed if neither matches the repo's settings).
     var perRepoMergeMethod: [String: String] = [:]  // value: "MERGE" / "SQUASH" / "REBASE"
+    /// Worktrees this app created and is responsible for cleaning up. Keyed by PR id;
+    /// value is the absolute worktree path on disk.
+    var worktrees: [String: String] = [:]
+    /// Activity timeline (newest last). Trimmed on every write to honor ActivityRetention.
+    var activity: [ActivityEvent] = []
     /// User's explicit choice to filter to pinned only. Survives across launches.
     /// Only honored when `pinned` is non-empty (UI hides the toggle otherwise).
     var showPinnedOnly: Bool = false

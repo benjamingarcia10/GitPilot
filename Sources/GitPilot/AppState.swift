@@ -32,6 +32,19 @@ final class AppState: ObservableObject {
     /// PR ids whose enable/disable auto-merge call is currently in flight.
     @Published private(set) var autoMergeInFlight: Set<String> = []
 
+    /// Active top-level view in the menu. Persisted across launches via UserDefaults
+    /// (lighter than another field on PersistedState since it's pure UI state).
+    @Published var currentTab: AppTab = .myPRs
+
+    /// PRs where the user is requested as a reviewer (direct or via team membership).
+    @Published private(set) var reviewingPRs: [PullRequest] = []
+
+    /// True while the reviewing-PRs query is in flight.
+    @Published private(set) var isLoadingReviewing = false
+
+    /// Cache of which worktree we're currently creating, by PR id.
+    @Published private(set) var worktreeInFlight: Set<String> = []
+
     /// All persisted state. Mutated only via mutate(_:) which also schedules a save.
     @Published private(set) var persistedState: PersistedState = PersistedState()
 
@@ -109,10 +122,19 @@ final class AppState: ObservableObject {
     // MARK: - Pin / snooze / auto-rebase API for the UI
 
     func togglePin(_ prId: String) {
+        let wasPinned = persistedState.pinned.contains(prId)
         mutate { s in
-            if s.pinned.contains(prId) { s.pinned.remove(prId) }
+            if wasPinned { s.pinned.remove(prId) }
             else { s.pinned.insert(prId) }
         }
+        if let pr = lookupPR(prId) {
+            record(wasPinned ? .unpinned : .pinned, pr: pr)
+        }
+    }
+
+    private func lookupPR(_ prId: String) -> PullRequest? {
+        monitor.prs.first(where: { $0.id == prId })
+            ?? reviewingPRs.first(where: { $0.id == prId })
     }
 
     func unpinAll() {
@@ -135,10 +157,15 @@ final class AppState: ObservableObject {
             s.notifiedReadyToMerge.remove(prId)
             s.notifiedBlockedByTests.remove(prId)
         }
+        if let pr = lookupPR(prId) {
+            let mins = Int(duration / 60)
+            record(.snoozed, pr: pr, detail: "for \(mins) min")
+        }
     }
 
     func unsnooze(_ prId: String) {
         mutate { s in s.snoozedUntil.removeValue(forKey: prId) }
+        if let pr = lookupPR(prId) { record(.unsnoozed, pr: pr) }
     }
 
     func toggleAutoRebase(_ prId: String) {
@@ -183,15 +210,18 @@ final class AppState: ObservableObject {
             do {
                 try await client.enableAutoMerge(prNodeId: pr.nodeId, method: method)
                 Log.debug("auto-merge \(prId) enabled GitHub-side using \(method.rawValue)")
+                record(.autoMergeEnabled, pr: pr, detail: method.rawValue)
             } catch {
                 // GitHub-side isn't available; we'll merge from this app when ready.
                 Log.debug("auto-merge \(prId) GitHub-side unavailable, falling back: \(error.localizedDescription)")
+                record(.autoMergeEnabled, pr: pr, detail: "client-side, \(method.rawValue)")
                 if pr.isReadyToMerge {
                     await runClientSideMergeIfFlagged(pr)
                 }
             }
         } else {
             mutate { $0.autoMerge.remove(prId) }
+            record(.autoMergeDisabled, pr: pr)
             // Best-effort cancel of GitHub-side auto-merge. Errors silently if
             // it wasn't armed there in the first place.
             do {
@@ -222,6 +252,7 @@ final class AppState: ObservableObject {
         do {
             try await client.mergePullRequest(prNodeId: pr.nodeId, method: method)
             Log.debug("auto-merge \(pr.id) merged client-side")
+            record(.merged, pr: pr, detail: method.rawValue)
             // Clear the flag now that the PR is gone from the open list.
             mutate { $0.autoMerge.remove(pr.id) }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -250,6 +281,148 @@ final class AppState: ObservableObject {
     }
 
     func isAutoMerge(_ prId: String) -> Bool { persistedState.autoMerge.contains(prId) }
+
+    // MARK: - Activity log
+
+    /// Append an event and trim per ActivityRetention. Call from transition handlers
+    /// and action handlers; never from the read path.
+    private func recordActivity(prId: String, prNumber: Int, prTitle: String, kind: ActivityEvent.Kind, detail: String? = nil) {
+        let event = ActivityEvent(
+            id: UUID(), timestamp: Date(),
+            prId: prId, prNumber: prNumber, prTitle: prTitle,
+            kind: kind, detail: detail
+        )
+        mutate { s in
+            s.activity.append(event)
+            // Cap by max age
+            let cutoff = Date().addingTimeInterval(-Double(ActivityRetention.maxAgeDays * 86400))
+            s.activity.removeAll { $0.timestamp < cutoff }
+            // Cap by max entries (keep newest)
+            if s.activity.count > ActivityRetention.maxEntries {
+                let drop = s.activity.count - ActivityRetention.maxEntries
+                s.activity.removeFirst(drop)
+            }
+        }
+    }
+
+    private func record(_ kind: ActivityEvent.Kind, pr: PullRequest, detail: String? = nil) {
+        recordActivity(prId: pr.id, prNumber: pr.number, prTitle: pr.title, kind: kind, detail: detail)
+    }
+
+    // MARK: - Reviewer PRs
+
+    func refreshReviewing() async {
+        guard !isLoadingReviewing else { return }
+        isLoadingReviewing = true
+        defer { isLoadingReviewing = false }
+        do {
+            let prs = try await client.fetchReviewingPRs()
+            // Enrich in parallel — same approach as the main monitor, but inline
+            // because PRMonitor isn't aware of the reviewing list.
+            var enriched = prs
+            await withTaskGroup(of: (Int, PREnrichment?).self) { group in
+                for (idx, pr) in prs.enumerated() {
+                    group.addTask { [client = self.client] in
+                        do {
+                            let e = try await client.enrichPR(nodeId: pr.nodeId)
+                            return (idx, e)
+                        } catch {
+                            return (idx, nil)
+                        }
+                    }
+                }
+                for await (idx, e) in group {
+                    guard let e else { continue }
+                    enriched[idx].mergeable = e.mergeable
+                    enriched[idx].mergeStateStatus = e.mergeStateStatus
+                    enriched[idx].reviewDecision = e.reviewDecision
+                    enriched[idx].checkRollupState = e.checkRollupState
+                    enriched[idx].checks = e.checks
+                }
+            }
+            reviewingPRs = enriched
+        } catch let err as GitHubClientError where err.isAuthError {
+            authStatus = .needsReauth(reason: err.localizedDescription)
+        } catch {
+            Log.debug("refreshReviewing failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Worktree actions
+
+    /// Create + open a worktree for the PR. Called from row's "Create worktree" action.
+    func createAndOpenWorktree(for pr: PullRequest) async {
+        guard !worktreeInFlight.contains(pr.id) else { return }
+        worktreeInFlight.insert(pr.id)
+        defer { worktreeInFlight.remove(pr.id) }
+
+        guard let repoPath = WorktreeManager.locateLocalRepo(owner: pr.repoOwner, name: pr.repoName) else {
+            await notifications.notifyAutoRebaseFailed(
+                pr: pr,
+                reason: "No local checkout found for \(pr.repoOwner)/\(pr.repoName)."
+            )
+            return
+        }
+        let worktreePath = WorktreeManager.resolvePath(
+            root: persistedState.settings.worktreeRoot,
+            repoOwner: pr.repoOwner, repoName: pr.repoName, branch: pr.headRefName
+        )
+        do {
+            try WorktreeManager.create(repoPath: repoPath, worktreePath: worktreePath, branch: pr.headRefName)
+            mutate { $0.worktrees[pr.id] = worktreePath.path }
+            WorktreeManager.openInEditor(worktreePath, command: persistedState.settings.editorCommand)
+        } catch {
+            Log.debug("createWorktree \(pr.id) failed: \(error.localizedDescription)")
+            await notifications.notifyAutoRebaseFailed(pr: pr, reason: error.localizedDescription)
+        }
+    }
+
+    /// Open an already-created worktree in the configured editor.
+    func openWorktreeInEditor(prId: String) {
+        guard let pathString = persistedState.worktrees[prId] else { return }
+        WorktreeManager.openInEditor(URL(fileURLWithPath: pathString), command: persistedState.settings.editorCommand)
+    }
+
+    /// Remove a worktree. `force` only set after the user confirms past a dirty state.
+    func removeWorktree(prId: String, force: Bool = false) {
+        guard let pathString = persistedState.worktrees[prId] else { return }
+        guard let pr = monitor.prs.first(where: { $0.id == prId })
+              ?? reviewingPRs.first(where: { $0.id == prId })
+        else {
+            // PR no longer in either list; we can still remove the worktree if we know the path.
+            removeWorktreeAtPath(pathString, prId: prId, repoOwner: nil, repoName: nil, force: force)
+            return
+        }
+        guard let repoPath = WorktreeManager.locateLocalRepo(owner: pr.repoOwner, name: pr.repoName) else {
+            mutate { $0.worktrees.removeValue(forKey: prId) }
+            return
+        }
+        do {
+            try WorktreeManager.remove(repoPath: repoPath, worktreePath: URL(fileURLWithPath: pathString), force: force)
+            mutate { $0.worktrees.removeValue(forKey: prId) }
+        } catch {
+            Log.debug("removeWorktree \(prId) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func removeWorktreeAtPath(_ pathString: String, prId: String, repoOwner: String?, repoName: String?, force: Bool) {
+        // Best-effort path-only removal when we no longer have the PR in our state.
+        let path = URL(fileURLWithPath: pathString)
+        do {
+            try FileManager.default.removeItem(at: path)
+            mutate { $0.worktrees.removeValue(forKey: prId) }
+        } catch {
+            Log.debug("removeWorktreeAtPath \(prId) failed: \(error.localizedDescription)")
+        }
+    }
+
+    func updateWorktreeRoot(_ root: String) {
+        mutate { $0.settings.worktreeRoot = root }
+    }
+
+    func updateEditorCommand(_ command: String) {
+        mutate { $0.settings.editorCommand = command }
+    }
 
     // MARK: - Per-repo merge method selection
 
@@ -350,6 +523,7 @@ final class AppState: ObservableObject {
         if pr.needsBranchUpdate {
             if !persistedState.notifiedNeedsUpdate.contains(pr.id) {
                 mutate { $0.notifiedNeedsUpdate.insert(pr.id) }
+                record(.becameBehind, pr: pr)
                 if persistedState.autoRebase.contains(pr.id) {
                     await runAutoRebase(pr: pr)
                 } else if persistedState.settings.enableRebaseNotification {
@@ -366,6 +540,7 @@ final class AppState: ObservableObject {
         if pr.isReadyToMerge {
             if !persistedState.notifiedReadyToMerge.contains(pr.id) {
                 mutate { $0.notifiedReadyToMerge.insert(pr.id) }
+                record(.becameReady, pr: pr)
                 if persistedState.settings.enableReadyNotification {
                     await notifications.notifyReadyToMerge(pr: pr)
                 }
@@ -386,6 +561,7 @@ final class AppState: ObservableObject {
         if pr.displayState == .blockedByTests {
             if !persistedState.notifiedBlockedByTests.contains(pr.id) {
                 mutate { $0.notifiedBlockedByTests.insert(pr.id) }
+                record(.becameTestsFailing, pr: pr)
                 if persistedState.settings.enableTestsFailingNotification {
                     await notifications.notifyTestsFailing(pr: pr)
                 }
@@ -406,11 +582,13 @@ final class AppState: ObservableObject {
         defer { rebaseInFlight.remove(pr.id) }
         do {
             try await client.updateBranch(prNodeId: pr.nodeId, method: .rebase)
+            record(.autoRebased, pr: pr)
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await monitor.refresh()
             Log.debug("auto-rebase \(pr.id) succeeded")
         } catch {
             Log.debug("auto-rebase \(pr.id) failed: \(error.localizedDescription)")
+            record(.autoRebaseFailed, pr: pr, detail: error.localizedDescription)
             if persistedState.settings.enableAutoRebaseFailureNotification {
                 await notifications.notifyAutoRebaseFailed(pr: pr, reason: error.localizedDescription)
             }
@@ -427,6 +605,7 @@ final class AppState: ObservableObject {
         defer { rebaseInFlight.remove(prId) }
         do {
             try await client.updateBranch(prNodeId: pr.nodeId, method: .rebase)
+            record(.rebased, pr: pr)
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await monitor.refresh()
         } catch {
@@ -571,6 +750,31 @@ final class AppState: ObservableObject {
             return nil
         } catch {
             return error.localizedDescription
+        }
+    }
+
+    /// Reviewing-tab PR list with repo + search filters applied. No pin/sort because
+    /// those concepts don't make sense for the reviewing surface (you're not
+    /// "focused" on someone else's PR the same way).
+    var filteredReviewingPRs: [PullRequest] {
+        var result = reviewingPRs
+        if let filter = repoFilter {
+            result = result.filter { "\($0.repoOwner)/\($0.repoName)" == filter }
+        }
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return result }
+        if useRegex {
+            guard let regex = try? NSRegularExpression(pattern: query, options: [.caseInsensitive]) else { return [] }
+            return result.filter { pr in
+                let h = "#\(pr.number) \(pr.title) \(pr.repoName) \(pr.headRefName)"
+                return regex.firstMatch(in: h, options: [], range: NSRange(h.startIndex..., in: h)) != nil
+            }
+        }
+        return result.filter { pr in
+            pr.title.localizedCaseInsensitiveContains(query) ||
+            "#\(pr.number)".contains(query) ||
+            pr.repoName.localizedCaseInsensitiveContains(query) ||
+            pr.headRefName.localizedCaseInsensitiveContains(query)
         }
     }
 

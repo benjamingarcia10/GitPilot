@@ -86,45 +86,58 @@ private struct MenuContent: View {
                 }
                 Spacer()
                 RefreshButton(
-                    isRefreshing: monitor.isRefreshing,
+                    isRefreshing: monitor.isRefreshing || state.isLoadingReviewing,
                     isEnabled: state.authStatus == authenticatedShape(state.authStatus),
-                    action: { Task { await monitor.refresh() } }
+                    action: {
+                        Task {
+                            switch state.currentTab {
+                            case .reviewing: await state.refreshReviewing()
+                            default:         await monitor.refresh()
+                            }
+                        }
+                    }
                 )
             }
 
-            if case .authenticated = state.authStatus, !monitor.prs.isEmpty {
-                SearchBar(state: state)
+            if case .authenticated = state.authStatus {
+                TabSwitcher(state: state)
             }
 
-            if case .authenticated = state.authStatus, !state.availableRepos.isEmpty {
-                HStack(spacing: 6) {
-                    Text("Repo").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { state.repoFilter ?? "" },
-                        set: { state.repoFilter = $0.isEmpty ? nil : $0 }
-                    )) {
-                        Text("All (\(state.monitor.prs.count))").tag("")
-                        ForEach(state.availableRepos, id: \.self) { repo in
-                            let count = state.monitor.prs.filter { "\($0.repoOwner)/\($0.repoName)" == repo }.count
-                            Text("\(repo) (\(count))").tag(repo)
+            // Filters only show on the PR-list tabs.
+            if case .authenticated = state.authStatus,
+               state.currentTab == .myPRs || state.currentTab == .reviewing,
+               !currentTabPRs.isEmpty {
+                SearchBar(state: state)
+                if !currentTabRepos.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Repo").font(.caption).foregroundStyle(.secondary)
+                        Picker("", selection: Binding(
+                            get: { state.repoFilter ?? "" },
+                            set: { state.repoFilter = $0.isEmpty ? nil : $0 }
+                        )) {
+                            Text("All (\(currentTabPRs.count))").tag("")
+                            ForEach(currentTabRepos, id: \.self) { repo in
+                                let count = currentTabPRs.filter { "\($0.repoOwner)/\($0.repoName)" == repo }.count
+                                Text("\(repo) (\(count))").tag(repo)
+                            }
                         }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity)
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity)
 
-                    Text("Sort").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { state.persistedState.settings.sortOrder },
-                        set: { newValue in state.updateSettings { $0.sortOrder = newValue } }
-                    )) {
-                        ForEach(PRSortOption.allCases, id: \.self) { opt in
-                            Text(opt.label).tag(opt)
+                        Text("Sort").font(.caption).foregroundStyle(.secondary)
+                        Picker("", selection: Binding(
+                            get: { state.persistedState.settings.sortOrder },
+                            set: { newValue in state.updateSettings { $0.sortOrder = newValue } }
+                        )) {
+                            ForEach(PRSortOption.allCases, id: \.self) { opt in
+                                Text(opt.label).tag(opt)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 130)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 130)
                 }
             }
             Divider()
@@ -135,7 +148,7 @@ private struct MenuContent: View {
             case .needsReauth(let reason):
                 AuthBanner(reason: reason, onRetry: { Task { await state.checkAuth() } })
             case .authenticated:
-                authenticatedBody
+                tabBody
             }
 
             Divider()
@@ -181,13 +194,36 @@ private struct MenuContent: View {
         }
     }
 
+    /// PRs to draw filter/repo lists from on the active tab. Reviewing tab uses
+    /// state.reviewingPRs; everything else uses monitor.prs.
+    private var currentTabPRs: [PullRequest] {
+        switch state.currentTab {
+        case .reviewing: return state.reviewingPRs
+        default:         return monitor.prs
+        }
+    }
+
+    private var currentTabRepos: [String] {
+        Array(Set(currentTabPRs.map { "\($0.repoOwner)/\($0.repoName)" })).sorted()
+    }
+
     @ViewBuilder
-    private var authenticatedBody: some View {
+    private var tabBody: some View {
+        switch state.currentTab {
+        case .myPRs:     myPRsTab
+        case .reviewing: reviewingTab
+        case .activity:  ActivityTabContent(state: state)
+        case .worktrees: WorktreesTabContent(state: state)
+        }
+        // Settings stays below regardless of tab so it's always reachable.
+        SettingsSection(state: state)
+    }
+
+    @ViewBuilder
+    private var myPRsTab: some View {
         if let err = monitor.lastError {
             Text(err).foregroundStyle(.red).font(.caption)
         }
-        // Pin filter banner stays above the scroll area so the focus mode and
-        // "Unpin all" escape are always visible regardless of scroll position.
         if !state.persistedState.pinned.isEmpty {
             PinnedBanner(state: state)
         }
@@ -198,9 +234,6 @@ private struct MenuContent: View {
             Text(state.persistedState.pinned.isEmpty ? "No PRs match" : "No pinned PRs match")
                 .foregroundStyle(.secondary)
         } else {
-            // Only the PR list scrolls. maxHeight is set so the menu never overflows
-            // the screen, and so the rest of the menu chrome (header, filters, settings,
-            // footer) stays put as the list grows.
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(visible) { pr in
@@ -210,8 +243,31 @@ private struct MenuContent: View {
             }
             .frame(maxHeight: 500)
         }
-        // Settings disclosure stays below the scroll area so it's always one click away.
-        SettingsSection(state: state)
+    }
+
+    @ViewBuilder
+    private var reviewingTab: some View {
+        if state.reviewingPRs.isEmpty && !state.isLoadingReviewing {
+            Text("No PRs awaiting your review").foregroundStyle(.secondary)
+                .task { await state.refreshReviewing() }
+        } else if state.reviewingPRs.isEmpty {
+            Text("Loading…").foregroundStyle(.secondary)
+        } else {
+            // Apply repo filter + search to reviewing PRs (sort/pin don't apply here).
+            let visible = state.filteredReviewingPRs
+            if visible.isEmpty {
+                Text("No PRs match").foregroundStyle(.secondary)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(visible) { pr in
+                            PRRow(pr: pr, state: state)
+                        }
+                    }
+                }
+                .frame(maxHeight: 500)
+            }
+        }
     }
 
     /// Helper so the disabled-binding above type-checks; SwiftUI doesn't like
@@ -404,6 +460,27 @@ private struct PRRow: View {
                         Image(systemName: "arrow.triangle.merge").font(.caption2).foregroundStyle(.green)
                             .help("Auto-merge enabled — GitHub will merge once requirements are met")
                     }
+                    if state.persistedState.worktrees[pr.id] != nil {
+                        Image(systemName: "folder.fill").font(.caption2).foregroundStyle(.brown)
+                            .help("Worktree active")
+                    }
+                }
+                // Reviewer-source badges only render on rows that have them (Reviewing tab).
+                if !pr.reviewerSources.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(pr.reviewerSources, id: \.self) { source in
+                            Text(reviewerSourceLabel(source))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                                )
+                        }
+                    }
+                    .padding(.top, 1)
                 }
                 // Metadata + actions on a compact line below.
                 HStack(spacing: 6) {
@@ -416,6 +493,12 @@ private struct PRRow: View {
                     Text(statusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if pr.changedFiles > 0 {
+                        Text("·").foregroundStyle(.secondary).font(.caption)
+                        Text(verbatim: "+\(pr.additions) −\(pr.deletions) · \(pr.changedFiles)f")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
                     if let until = state.snoozedUntil(pr.id), until > Date() {
                         TimelineView(.periodic(from: .now, by: 30)) { context in
                             let remaining = max(0, until.timeIntervalSince(context.date))
@@ -487,6 +570,23 @@ private struct PRRow: View {
         }
         .disabled(inFlight)
         Divider()
+        // Worktree actions. "Create worktree" creates a worktree at the configured root
+        // and opens it in the editor; "Open worktree" reopens an existing one.
+        if state.persistedState.worktrees[pr.id] != nil {
+            Button("Open worktree in editor") {
+                state.openWorktreeInEditor(prId: pr.id)
+            }
+            Button("Remove worktree") {
+                state.removeWorktree(prId: pr.id)
+            }
+        } else {
+            let inFlight = state.worktreeInFlight.contains(pr.id)
+            Button(inFlight ? "Creating worktree…" : "Create worktree") {
+                Task { await state.createAndOpenWorktree(for: pr) }
+            }
+            .disabled(inFlight)
+        }
+        Divider()
         Button("Open in browser") { NSWorkspace.shared.open(pr.url) }
         Button("Copy URL") {
             NSPasteboard.general.clearContents()
@@ -503,6 +603,14 @@ private struct PRRow: View {
         components.minute = 0
         let target = cal.date(from: components) ?? now.addingTimeInterval(8 * 3600)
         return max(60, target.timeIntervalSince(now))
+    }
+
+    /// Human label for a reviewer-source entry — shown as a small pill on the row.
+    private func reviewerSourceLabel(_ source: ReviewerSource) -> String {
+        switch source.kind {
+        case .direct: return "you"
+        case .team:   return "@\(source.teamSlug ?? "team")"
+        }
     }
 
     private func autoMergeMenuLabel(inFlight: Bool) -> String {
@@ -595,6 +703,285 @@ private struct PRRow: View {
         case .dirty:    return "merge conflict"
         case .hasHooks: return "ready (with hooks)"
         case .unknown:  return "checking…"
+        }
+    }
+}
+
+/// Top-level tab switcher. Four tabs, one row, hover-highlighted, accent-tinted
+/// when active. Switches state.currentTab.
+private struct TabSwitcher: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(AppTab.allCases) { tab in
+                tabButton(for: tab)
+            }
+        }
+    }
+
+    private func tabButton(for tab: AppTab) -> some View {
+        let isActive = state.currentTab == tab
+        return Button(action: { state.currentTab = tab }) {
+            HStack(spacing: 4) {
+                Image(systemName: tab.icon).font(.caption)
+                Text(tab.label).font(.caption)
+            }
+            .foregroundStyle(isActive ? Color.accentColor : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .hoverHighlight(cornerRadius: 5)
+    }
+}
+
+/// Activity tab — chronological event log (newest first), capped per ActivityRetention.
+private struct ActivityTabContent: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if state.persistedState.activity.isEmpty {
+                Text("No activity yet — events show up as PRs change state and you take actions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+            } else {
+                let events = Array(state.persistedState.activity.reversed())
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(events) { event in
+                            ActivityRow(event: event, state: state)
+                        }
+                    }
+                }
+                .frame(maxHeight: 460)
+                Text("Showing last \(events.count) events · capped at \(ActivityRetention.maxEntries) entries / \(ActivityRetention.maxAgeDays) days")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct ActivityRow: View {
+    let event: ActivityEvent
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .frame(width: 16, height: 16, alignment: .center)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(verbatim: "#\(event.prNumber)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text(label).font(.caption)
+                    Spacer()
+                    Text(timeFormatter.string(from: event.timestamp))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(event.prTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let detail = event.detail {
+                    Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .hoverHighlight(cornerRadius: 4)
+        .onTapGesture {
+            // Jump to the PR if it's still in the list.
+            if let pr = state.monitor.prs.first(where: { $0.id == event.prId })
+                ?? state.reviewingPRs.first(where: { $0.id == event.prId }) {
+                NSWorkspace.shared.open(pr.url)
+            }
+        }
+    }
+
+    private var label: String {
+        switch event.kind {
+        case .becameBehind:        return "behind base"
+        case .becameReady:         return "ready to merge"
+        case .becameTestsFailing:  return "tests failing"
+        case .becameConflicts:     return "merge conflict"
+        case .rebased:             return "rebased"
+        case .autoRebased:         return "auto-rebased"
+        case .autoRebaseFailed:    return "auto-rebase failed"
+        case .merged:              return "merged"
+        case .pinned:              return "pinned"
+        case .unpinned:            return "unpinned"
+        case .snoozed:             return "snoozed"
+        case .unsnoozed:           return "snooze cancelled"
+        case .autoMergeEnabled:    return "auto-merge enabled"
+        case .autoMergeDisabled:   return "auto-merge disabled"
+        case .appeared:            return "appeared"
+        case .disappeared:         return "left list"
+        }
+    }
+
+    private var icon: String {
+        switch event.kind {
+        case .becameBehind, .rebased, .autoRebased: return "arrow.triangle.2.circlepath"
+        case .becameReady:                          return "checkmark.circle.fill"
+        case .becameTestsFailing, .autoRebaseFailed: return "xmark.octagon.fill"
+        case .becameConflicts:                      return "exclamationmark.triangle.fill"
+        case .merged:                               return "arrow.triangle.merge"
+        case .pinned, .unpinned:                    return "pin.fill"
+        case .snoozed, .unsnoozed:                  return "moon.zzz.fill"
+        case .autoMergeEnabled, .autoMergeDisabled: return "bolt.fill"
+        case .appeared:                             return "plus.circle"
+        case .disappeared:                          return "minus.circle"
+        }
+    }
+
+    private var color: Color {
+        switch event.kind {
+        case .becameReady, .merged, .rebased, .autoRebased: return .green
+        case .becameTestsFailing, .autoRebaseFailed, .becameConflicts: return .red
+        case .becameBehind: return .orange
+        case .pinned: return Color.accentColor
+        case .snoozed: return .purple
+        default: return .secondary
+        }
+    }
+
+    private var timeFormatter: DateFormatter {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, HH:mm"
+        return f
+    }
+}
+
+/// Worktrees tab — lists all managed worktrees with status (clean / dirty / missing)
+/// and remove buttons. Source of truth is persistedState.worktrees.
+private struct WorktreesTabContent: View {
+    @ObservedObject var state: AppState
+    /// Status snapshot per PR id. Re-checked on tab open and after operations.
+    @State private var statusByPRId: [String: WorktreeStatus] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if state.persistedState.worktrees.isEmpty {
+                Text("No worktrees yet — use the ⋯ menu on a PR to create one.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(state.persistedState.worktrees.keys.sorted()), id: \.self) { prId in
+                            if let path = state.persistedState.worktrees[prId] {
+                                WorktreeRow(
+                                    prId: prId,
+                                    path: path,
+                                    status: statusByPRId[prId] ?? .clean,
+                                    state: state,
+                                    onRefresh: { refreshStatus(prId: prId, path: path) }
+                                )
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 460)
+                Text("Cleanup: dirty worktrees are never auto-removed; merged PRs prompt you to clean up.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task { refreshAllStatuses() }
+    }
+
+    private func refreshAllStatuses() {
+        var snapshot: [String: WorktreeStatus] = [:]
+        for (prId, path) in state.persistedState.worktrees {
+            snapshot[prId] = WorktreeManager.status(at: URL(fileURLWithPath: path))
+        }
+        statusByPRId = snapshot
+    }
+
+    private func refreshStatus(prId: String, path: String) {
+        statusByPRId[prId] = WorktreeManager.status(at: URL(fileURLWithPath: path))
+    }
+}
+
+private struct WorktreeRow: View {
+    let prId: String
+    let path: String
+    let status: WorktreeStatus
+    @ObservedObject var state: AppState
+    let onRefresh: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon).foregroundStyle(color).frame(width: 16, height: 18, alignment: .center)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(prTitle).font(.caption).lineLimit(1).truncationMode(.tail)
+                Text(path).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                if case .dirty(let summary) = status {
+                    Text("dirty: \(summary)").font(.caption2).foregroundStyle(.red).lineLimit(1)
+                }
+            }
+            Spacer()
+            Button("Open") {
+                state.openWorktreeInEditor(prId: prId)
+            }
+            .buttonStyle(.hover)
+            .font(.caption)
+            Button(role: .destructive) {
+                let force: Bool = {
+                    if case .dirty = status { return true }
+                    return false
+                }()
+                state.removeWorktree(prId: prId, force: force)
+                onRefresh()
+            } label: {
+                Text("Remove")
+            }
+            .buttonStyle(.hover)
+            .font(.caption)
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 4)
+        .hoverHighlight(cornerRadius: 5)
+    }
+
+    private var prTitle: String {
+        // Look up the PR by id if it's still in our list, else show the path's last component.
+        if let pr = state.monitor.prs.first(where: { $0.id == prId })
+            ?? state.reviewingPRs.first(where: { $0.id == prId }) {
+            return "#\(pr.number) · \(pr.title)"
+        }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private var icon: String {
+        switch status {
+        case .clean:   return "folder.fill"
+        case .dirty:   return "exclamationmark.triangle.fill"
+        case .missing: return "questionmark.folder"
+        }
+    }
+
+    private var color: Color {
+        switch status {
+        case .clean:   return .green
+        case .dirty:   return .red
+        case .missing: return .secondary
         }
     }
 }
@@ -906,6 +1293,35 @@ private struct SettingsSection: View {
                             .frame(maxWidth: 160)
                         }
                     }
+                }
+                Divider().padding(.vertical, 2)
+                HStack {
+                    Text("Worktree root").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    TextField("~/worktrees/gitpilot", text: Binding(
+                        get: { state.persistedState.settings.worktreeRoot },
+                        set: { state.updateWorktreeRoot($0) }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .frame(maxWidth: 220)
+                }
+                HStack {
+                    Text("Editor").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { state.persistedState.settings.editorCommand },
+                        set: { state.updateEditorCommand($0) }
+                    )) {
+                        Text("Auto").tag("auto")
+                        Text("Cursor").tag("cursor")
+                        Text("VSCode").tag("code")
+                        Text("Sublime").tag("subl")
+                        Text("Finder").tag("finder")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 130)
                 }
                 Divider().padding(.vertical, 2)
                 HStack {

@@ -13,6 +13,9 @@ final class PRMonitor: ObservableObject {
     @Published private(set) var prs: [PullRequest] = []
     @Published private(set) var lastError: String?
     @Published private(set) var lastRefresh: Date?
+    /// True while a refresh is in flight (covers both phases). Drives the spinner
+    /// in the menu and disables the refresh button to prevent spam-clicking.
+    @Published private(set) var isRefreshing: Bool = false
 
     /// Set of PR ids we've already notified for each transition kind, so we don't re-fire
     /// on every poll while the PR sits in that state. Cleared when the PR leaves the state.
@@ -57,6 +60,11 @@ final class PRMonitor: ObservableObject {
     ///   2. Enrich each PR in parallel; apply each result as it arrives.
     /// Transitions are evaluated in phase 2, after a PR has its merge state.
     func refresh() async {
+        // No-op if already refreshing — the UI also disables the button, but defend in depth.
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         let refreshStart = Date()
         Log.debug("refresh start")
         do {

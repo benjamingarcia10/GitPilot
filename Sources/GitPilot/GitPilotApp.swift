@@ -49,11 +49,11 @@ private struct MenuContent: View {
                     Text("@\(login)").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Refresh") {
-                    Task { await monitor.refresh() }
-                }
-                .buttonStyle(.borderless)
-                .disabled(state.authStatus != authenticatedShape(state.authStatus))
+                RefreshButton(
+                    isRefreshing: monitor.isRefreshing,
+                    isEnabled: state.authStatus == authenticatedShape(state.authStatus),
+                    action: { Task { await monitor.refresh() } }
+                )
             }
 
             if case .authenticated = state.authStatus, !state.availableRepos.isEmpty {
@@ -127,6 +127,40 @@ private struct MenuContent: View {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .abbreviated
         return f.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+/// Circular-arrow button that spins while a refresh is in flight and is
+/// disabled while either refreshing or unauthenticated, so users can't spam-click.
+private struct RefreshButton: View {
+    let isRefreshing: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    @State private var degrees: Double = 0
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .imageScale(.medium)
+                .rotationEffect(.degrees(degrees))
+        }
+        .buttonStyle(.borderless)
+        .disabled(!isEnabled || isRefreshing)
+        .help(isRefreshing ? "Refreshing…" : "Refresh")
+        .onChange(of: isRefreshing) { refreshing in
+            if refreshing {
+                // Repeat-forever animation drives a continuous spin until isRefreshing flips false.
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                    degrees = 360
+                }
+            } else {
+                // Stop any in-flight animation immediately and snap back to upright.
+                withAnimation(.linear(duration: 0.15)) {
+                    degrees = 0
+                }
+            }
+        }
     }
 }
 

@@ -13,6 +13,10 @@ final class AppState: ObservableObject {
     /// monitor's onAuthError callback when polling hits a 401.
     @Published var authStatus: AuthStatus = .unknown
 
+    /// SwiftUI's `.task` modifier re-fires when the menu popover reappears.
+    /// Without this guard, every open would kick off a fresh fetch and blank the list.
+    private var didBootstrap = false
+
     init() {
         let client = GitHubClient()
         self.client = client
@@ -29,6 +33,8 @@ final class AppState: ObservableObject {
     }
 
     func bootstrap() async {
+        guard !didBootstrap else { return }
+        didBootstrap = true
         await notifications.bootstrap()
         await checkAuth()
     }

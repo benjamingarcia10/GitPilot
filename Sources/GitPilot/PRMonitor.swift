@@ -36,7 +36,8 @@ final class PRMonitor: ObservableObject {
     }
 
     func start() {
-        task?.cancel()
+        // No-op if already running — protects against menu-open re-bootstrap kicking off duplicate fetches.
+        if let existing = task, !existing.isCancelled { return }
         task = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -51,45 +52,89 @@ final class PRMonitor: ObservableObject {
         task = nil
     }
 
-    /// Fetch PRs once and emit transitions for any that crossed a threshold since last refresh.
+    /// Two-phase refresh:
+    ///   1. Fetch the list and publish immediately so the UI shows rows right away.
+    ///   2. Enrich each PR in parallel; apply each result as it arrives.
+    /// Transitions are evaluated in phase 2, after a PR has its merge state.
     func refresh() async {
         do {
-            let fresh = try await client.fetchMyOpenPRs()
+            let lightPRs = try await client.fetchMyOpenPRs()
 
-            for pr in fresh {
-                if pr.needsBranchUpdate {
-                    if !notifiedNeedsUpdate.contains(pr.id) {
-                        notifiedNeedsUpdate.insert(pr.id)
-                        await onTransition(.needsBranchUpdate(pr))
-                    }
-                } else {
-                    notifiedNeedsUpdate.remove(pr.id)
-                }
-
-                if pr.isReadyToMerge {
-                    if !notifiedReadyToMerge.contains(pr.id) {
-                        notifiedReadyToMerge.insert(pr.id)
-                        await onTransition(.readyToMerge(pr))
-                    }
-                } else {
-                    notifiedReadyToMerge.remove(pr.id)
-                }
+            // Preserve enrichment from the previous snapshot for any PR we still see —
+            // avoids spinner flicker on PRs whose state hasn't changed.
+            let previousById = Dictionary(uniqueKeysWithValues: prs.map { ($0.id, $0) })
+            prs = lightPRs.map { fresh in
+                guard let prev = previousById[fresh.id] else { return fresh }
+                var merged = fresh
+                merged.mergeable = prev.mergeable
+                merged.mergeStateStatus = prev.mergeStateStatus
+                merged.reviewDecision = prev.reviewDecision
+                return merged
             }
+            lastError = nil
+            lastRefresh = Date()
 
-            // Drop notification state for PRs that are no longer in the list (closed/merged).
-            let liveIds = Set(fresh.map { $0.id })
+            // Drop notification state for PRs that are no longer in the list.
+            let liveIds = Set(lightPRs.map { $0.id })
             notifiedNeedsUpdate.formIntersection(liveIds)
             notifiedReadyToMerge.formIntersection(liveIds)
 
-            prs = fresh
-            lastError = nil
-            lastRefresh = Date()
+            // Enrich in parallel. Each task awaits one cheap GraphQL call and updates one row.
+            await withTaskGroup(of: Void.self) { group in
+                for pr in lightPRs {
+                    group.addTask { [weak self] in
+                        guard let self else { return }
+                        do {
+                            let enrichment = try await self.client.enrichPR(nodeId: pr.nodeId)
+                            await self.applyEnrichment(prId: pr.id, enrichment: enrichment)
+                        } catch let err as GitHubClientError where err.isAuthError {
+                            await self.handleAuthError(err.localizedDescription)
+                        } catch {
+                            // Non-auth enrichment failures: leave the row in loading state.
+                            // A future refresh will retry.
+                        }
+                    }
+                }
+            }
         } catch let err as GitHubClientError where err.isAuthError {
-            // Don't keep polling with bad creds; AppState will surface a banner.
             stop()
             onAuthError(err.localizedDescription)
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    /// Apply an enrichment result to the matching PR and re-evaluate its transitions.
+    private func applyEnrichment(prId: String, enrichment: PREnrichment) async {
+        guard let idx = prs.firstIndex(where: { $0.id == prId }) else { return }
+        var pr = prs[idx]
+        pr.mergeable = enrichment.mergeable
+        pr.mergeStateStatus = enrichment.mergeStateStatus
+        pr.reviewDecision = enrichment.reviewDecision
+        prs[idx] = pr
+
+        // Edge-triggered transition checks for just this PR.
+        if pr.needsBranchUpdate {
+            if !notifiedNeedsUpdate.contains(pr.id) {
+                notifiedNeedsUpdate.insert(pr.id)
+                await onTransition(.needsBranchUpdate(pr))
+            }
+        } else {
+            notifiedNeedsUpdate.remove(pr.id)
+        }
+
+        if pr.isReadyToMerge {
+            if !notifiedReadyToMerge.contains(pr.id) {
+                notifiedReadyToMerge.insert(pr.id)
+                await onTransition(.readyToMerge(pr))
+            }
+        } else {
+            notifiedReadyToMerge.remove(pr.id)
+        }
+    }
+
+    private func handleAuthError(_ reason: String) {
+        stop()
+        onAuthError(reason)
     }
 }

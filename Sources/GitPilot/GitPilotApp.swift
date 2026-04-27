@@ -162,7 +162,7 @@ private struct PRRow: View {
             HStack(spacing: 8) {
                 Text(statusText).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if pr.needsBranchUpdate {
+                if !pr.isLoading && pr.needsBranchUpdate {
                     Button("Rebase") {
                         Task { await rebase() }
                     }
@@ -178,6 +178,7 @@ private struct PRRow: View {
     }
 
     private var icon: String {
+        if pr.isLoading { return "circle.dotted" }
         if pr.isReadyToMerge { return "checkmark.circle.fill" }
         if pr.needsBranchUpdate { return "arrow.triangle.2.circlepath" }
         if pr.mergeStateStatus == .dirty { return "exclamationmark.triangle.fill" }
@@ -185,6 +186,7 @@ private struct PRRow: View {
     }
 
     private var color: Color {
+        if pr.isLoading { return .secondary }
         if pr.isReadyToMerge { return .green }
         if pr.mergeStateStatus == .dirty { return .red }
         if pr.needsBranchUpdate { return .orange }
@@ -192,7 +194,10 @@ private struct PRRow: View {
     }
 
     private var statusText: String {
-        var parts: [String] = [pr.mergeStateStatus.rawValue.lowercased()]
+        if pr.isLoading {
+            return pr.isDraft ? "loading · draft" : "loading…"
+        }
+        var parts: [String] = [(pr.mergeStateStatus ?? .unknown).rawValue.lowercased()]
         if let r = pr.reviewDecision { parts.append(r.lowercased()) }
         if pr.isDraft { parts.append("draft") }
         return parts.joined(separator: " · ")

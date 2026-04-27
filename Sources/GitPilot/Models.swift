@@ -36,14 +36,19 @@ struct PullRequest: Codable, Identifiable, Equatable {
     let url: URL
     let headRefName: String
     let baseRefName: String
-    let mergeable: String           // "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
-    let mergeStateStatus: MergeStateStatus
-    let reviewDecision: String?     // "APPROVED" | "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | nil
     let isDraft: Bool
     let repoOwner: String
     let repoName: String
 
+    // Filled in by the enrichment phase. Nil while loading so the row can render
+    // immediately with a placeholder status icon.
+    var mergeable: String?           // "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
+    var mergeStateStatus: MergeStateStatus?
+    var reviewDecision: String?      // "APPROVED" | "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | nil
+
     var id: String { "\(repoOwner)/\(repoName)#\(number)" }
+
+    var isLoading: Bool { mergeStateStatus == nil }
 
     /// Whether the PR is in the narrow window where you can merge: green, approved, up to date.
     var isReadyToMerge: Bool {
@@ -54,4 +59,11 @@ struct PullRequest: Codable, Identifiable, Equatable {
     var needsBranchUpdate: Bool {
         mergeStateStatus == .behind || mergeStateStatus == .blocked
     }
+}
+
+/// Slow-to-compute fields fetched per-PR in the enrichment phase.
+struct PREnrichment: Equatable {
+    let mergeable: String
+    let mergeStateStatus: MergeStateStatus
+    let reviewDecision: String?
 }

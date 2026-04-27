@@ -93,10 +93,11 @@ actor GitHubClient {
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    // MARK: - PR fetch
+    // MARK: - PR fetch (two-phase)
 
-    /// Fetches the authenticated user's open PRs across all repos they have access to,
-    /// returning the merge readiness fields we care about.
+    /// Phase 1: lightweight list. Excludes mergeStateStatus/mergeable/reviewDecision
+    /// because GitHub computes those lazily and they can be slow. The UI shows
+    /// these PRs immediately; per-PR enrichment fills the missing fields.
     func fetchMyOpenPRs() async throws -> [PullRequest] {
         let login = try currentLogin()
         let query = """
@@ -110,9 +111,6 @@ actor GitHubClient {
                 url
                 headRefName
                 baseRefName
-                mergeable
-                mergeStateStatus
-                reviewDecision
                 isDraft
                 repository { name owner { login } }
               }
@@ -120,14 +118,11 @@ actor GitHubClient {
           }
         }
         """
-        let payload = ["query": query]
-        let data = try await graphQL(payload: payload)
+        let data = try await graphQL(payload: ["query": query])
 
         struct GQLResponse: Decodable {
             struct Data: Decodable {
-                struct Search: Decodable {
-                    let nodes: [PRNode]
-                }
+                struct Search: Decodable { let nodes: [PRNode] }
                 let search: Search
             }
             struct PRNode: Decodable {
@@ -137,9 +132,6 @@ actor GitHubClient {
                 let url: URL
                 let headRefName: String
                 let baseRefName: String
-                let mergeable: String
-                let mergeStateStatus: String
-                let reviewDecision: String?
                 let isDraft: Bool
                 let repository: Repo
                 struct Repo: Decodable {
@@ -161,14 +153,55 @@ actor GitHubClient {
                     url: node.url,
                     headRefName: node.headRefName,
                     baseRefName: node.baseRefName,
-                    mergeable: node.mergeable,
-                    mergeStateStatus: MergeStateStatus(rawValue: node.mergeStateStatus) ?? .unknown,
-                    reviewDecision: node.reviewDecision,
                     isDraft: node.isDraft,
                     repoOwner: node.repository.owner.login,
-                    repoName: node.repository.name
+                    repoName: node.repository.name,
+                    mergeable: nil,
+                    mergeStateStatus: nil,
+                    reviewDecision: nil
                 )
             }
+        } catch {
+            throw GitHubClientError.decodingFailed(String(describing: error))
+        }
+    }
+
+    /// Phase 2: per-PR enrichment with the slow fields. Run these in parallel from the caller.
+    func enrichPR(nodeId: String) async throws -> PREnrichment {
+        let query = """
+        query($id: ID!) {
+          node(id: $id) {
+            ... on PullRequest {
+              mergeable
+              mergeStateStatus
+              reviewDecision
+            }
+          }
+        }
+        """
+        let payload: [String: Any] = ["query": query, "variables": ["id": nodeId]]
+        let data = try await graphQL(payload: payload)
+
+        struct GQLResponse: Decodable {
+            struct Data: Decodable { let node: Node? }
+            struct Node: Decodable {
+                let mergeable: String?
+                let mergeStateStatus: String?
+                let reviewDecision: String?
+            }
+            let data: Data
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
+            guard let node = decoded.data.node else {
+                throw GitHubClientError.decodingFailed("missing node for \(nodeId)")
+            }
+            return PREnrichment(
+                mergeable: node.mergeable ?? "UNKNOWN",
+                mergeStateStatus: MergeStateStatus(rawValue: node.mergeStateStatus ?? "UNKNOWN") ?? .unknown,
+                reviewDecision: node.reviewDecision
+            )
         } catch {
             throw GitHubClientError.decodingFailed(String(describing: error))
         }

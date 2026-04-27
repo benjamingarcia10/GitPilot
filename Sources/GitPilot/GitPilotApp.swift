@@ -174,27 +174,35 @@ private struct PRRow: View {
     @ObservedObject var state: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: icon).foregroundStyle(color)
-                Text("#\(pr.number)").font(.system(.body, design: .monospaced))
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .padding(.top, 2)
+                .frame(width: 16, alignment: .center)
+            VStack(alignment: .leading, spacing: 2) {
+                // Title gets the full remaining width; wraps cleanly at word boundaries.
                 Text(pr.title)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 8) {
-                Text(statusText).font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                if !pr.isLoading && pr.needsBranchUpdate {
-                    Button("Rebase") {
-                        Task { await rebase() }
+                // Metadata + actions on a compact line below.
+                HStack(spacing: 6) {
+                    Text("#\(pr.number)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("·").foregroundStyle(.secondary).font(.caption)
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if !pr.isLoading && pr.needsBranchUpdate {
+                        Button("Rebase") { Task { await rebase() } }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
                     }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
+                    Button("Open") { NSWorkspace.shared.open(pr.url) }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
                 }
-                Button("Open") { NSWorkspace.shared.open(pr.url) }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
             }
         }
         .padding(.vertical, 4)

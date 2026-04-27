@@ -77,7 +77,7 @@ private struct MenuContent: View {
             }
         }
         .padding(12)
-        .frame(width: 360)
+        .frame(width: 440)
         .task { await state.bootstrap() }
     }
 
@@ -154,10 +154,12 @@ private struct PRRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: icon).foregroundStyle(color)
                 Text("#\(pr.number)").font(.system(.body, design: .monospaced))
-                Text(pr.title).lineLimit(1).truncationMode(.tail)
+                Text(pr.title)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
                 Text(statusText).font(.caption).foregroundStyle(.secondary)

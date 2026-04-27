@@ -44,8 +44,16 @@ actor GitHubClient {
     private var cachedToken: String?
     private var cachedLogin: String?
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(session: URLSession? = nil) {
+        // URLSession.shared defaults to 6 connections per host, which serializes
+        // our parallel enrichment fan-out into batches of 6. With 25 PRs that's
+        // ~4 sequential batches. Bump it so true parallelism is possible.
+        self.session = session ?? {
+            let config = URLSessionConfiguration.default
+            config.httpMaximumConnectionsPerHost = 32
+            config.timeoutIntervalForRequest = 30
+            return URLSession(configuration: config)
+        }()
     }
 
     // MARK: - Auth
@@ -95,16 +103,15 @@ actor GitHubClient {
 
     // MARK: - PR fetch (two-phase)
 
-    /// Phase 1: lightweight list. Excludes mergeStateStatus/mergeable/reviewDecision
-    /// because GitHub computes those lazily and they can be slow. The UI shows
-    /// these PRs immediately; per-PR enrichment fills the missing fields.
+    /// Phase 1: lightweight list via `viewer.pullRequests` — a direct association lookup,
+    /// faster than going through the search index. Excludes mergeStateStatus/mergeable/
+    /// reviewDecision because GitHub computes those lazily and they can be slow.
     func fetchMyOpenPRs() async throws -> [PullRequest] {
-        let login = try currentLogin()
         let query = """
         {
-          search(query: "is:pr is:open author:\(login)", type: ISSUE, first: 25) {
-            nodes {
-              ... on PullRequest {
+          viewer {
+            pullRequests(states: OPEN, first: 25, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              nodes {
                 id
                 number
                 title
@@ -118,12 +125,17 @@ actor GitHubClient {
           }
         }
         """
+        let t0 = Date()
         let data = try await graphQL(payload: ["query": query])
+        Log.debug("phase1 fetchMyOpenPRs", elapsed: t0)
 
         struct GQLResponse: Decodable {
             struct Data: Decodable {
-                struct Search: Decodable { let nodes: [PRNode] }
-                let search: Search
+                struct Viewer: Decodable {
+                    struct PRConnection: Decodable { let nodes: [PRNode] }
+                    let pullRequests: PRConnection
+                }
+                let viewer: Viewer
             }
             struct PRNode: Decodable {
                 let id: String
@@ -145,7 +157,7 @@ actor GitHubClient {
 
         do {
             let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
-            return decoded.data.search.nodes.map { node in
+            return decoded.data.viewer.pullRequests.nodes.map { node in
                 PullRequest(
                     nodeId: node.id,
                     number: node.number,
@@ -180,7 +192,9 @@ actor GitHubClient {
         }
         """
         let payload: [String: Any] = ["query": query, "variables": ["id": nodeId]]
+        let t0 = Date()
         let data = try await graphQL(payload: payload)
+        Log.debug("enrichPR \(nodeId.suffix(8))", elapsed: t0)
 
         struct GQLResponse: Decodable {
             struct Data: Decodable { let node: Node? }

@@ -57,8 +57,11 @@ final class PRMonitor: ObservableObject {
     ///   2. Enrich each PR in parallel; apply each result as it arrives.
     /// Transitions are evaluated in phase 2, after a PR has its merge state.
     func refresh() async {
+        let refreshStart = Date()
+        Log.debug("refresh start")
         do {
             let lightPRs = try await client.fetchMyOpenPRs()
+            Log.debug("phase1 returned \(lightPRs.count) PRs", elapsed: refreshStart)
 
             // Preserve enrichment from the previous snapshot for any PR we still see —
             // avoids spinner flicker on PRs whose state hasn't changed.
@@ -80,6 +83,7 @@ final class PRMonitor: ObservableObject {
             notifiedReadyToMerge.formIntersection(liveIds)
 
             // Enrich in parallel. Each task awaits one cheap GraphQL call and updates one row.
+            let enrichStart = Date()
             await withTaskGroup(of: Void.self) { group in
                 for pr in lightPRs {
                     group.addTask { [weak self] in
@@ -96,6 +100,8 @@ final class PRMonitor: ObservableObject {
                     }
                 }
             }
+            Log.debug("phase2 enrichment complete", elapsed: enrichStart)
+            Log.debug("refresh total", elapsed: refreshStart)
         } catch let err as GitHubClientError where err.isAuthError {
             stop()
             onAuthError(err.localizedDescription)

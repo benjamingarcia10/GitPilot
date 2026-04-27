@@ -56,6 +56,10 @@ private struct MenuContent: View {
                 )
             }
 
+            if case .authenticated = state.authStatus, !monitor.prs.isEmpty {
+                SearchBar(state: state)
+            }
+
             if case .authenticated = state.authStatus, !state.availableRepos.isEmpty {
                 HStack(spacing: 6) {
                     Text("Repo").font(.caption).foregroundStyle(.secondary)
@@ -135,6 +139,54 @@ private struct MenuContent: View {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .abbreviated
         return f.localizedString(for: date, relativeTo: now)
+    }
+}
+
+/// Search field with a regex toggle. Filters the visible PR list by title/number/repo/branch.
+private struct SearchBar: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            TextField("Search PRs", text: $state.searchText)
+                .textFieldStyle(.plain)
+                .font(.caption)
+            if !state.searchText.isEmpty {
+                Button(action: { state.searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Clear")
+            }
+            // Regex toggle. Highlighted background when active so the mode is visible at a glance.
+            Button(action: { state.useRegex.toggle() }) {
+                Text(".*")
+                    .font(.system(.caption, design: .monospaced).weight(state.useRegex ? .bold : .regular))
+                    .foregroundStyle(state.useRegex ? Color.accentColor : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(state.useRegex ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.borderless)
+            .help(state.useRegex ? "Regex search (on)" : "Regex search (off)")
+            // Inline regex compile error indicator.
+            if let regexErr = state.regexError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .help("Invalid regex: \(regexErr)")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.secondary.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 

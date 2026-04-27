@@ -17,6 +17,13 @@ final class AppState: ObservableObject {
     /// Filtering is purely UI; the monitor still polls + enriches every PR.
     @Published var repoFilter: String? = nil
 
+    /// Free-text search applied to PR title, number, and repo name.
+    @Published var searchText: String = ""
+
+    /// When true, searchText is interpreted as a regex (case-insensitive). Otherwise
+    /// it's a plain case-insensitive substring match.
+    @Published var useRegex: Bool = false
+
     /// SwiftUI's `.task` modifier re-fires when the menu popover reappears.
     /// Without this guard, every open would kick off a fresh fetch and blank the list.
     private var didBootstrap = false
@@ -49,10 +56,45 @@ final class AppState: ObservableObject {
         return Array(Set(keys)).sorted()
     }
 
-    /// PRs to display, after applying the active repo filter.
+    /// PRs to display, after applying the active repo filter and search query.
     var visiblePRs: [PullRequest] {
-        guard let filter = repoFilter else { return monitor.prs }
-        return monitor.prs.filter { "\($0.repoOwner)/\($0.repoName)" == filter }
+        var result = monitor.prs
+        if let filter = repoFilter {
+            result = result.filter { "\($0.repoOwner)/\($0.repoName)" == filter }
+        }
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return result }
+
+        if useRegex {
+            // Invalid regex matches nothing; the UI surfaces the error inline.
+            guard let regex = try? NSRegularExpression(pattern: query, options: [.caseInsensitive]) else {
+                return []
+            }
+            return result.filter { pr in
+                let haystack = "#\(pr.number) \(pr.title) \(pr.repoName) \(pr.headRefName)"
+                let range = NSRange(haystack.startIndex..., in: haystack)
+                return regex.firstMatch(in: haystack, options: [], range: range) != nil
+            }
+        } else {
+            return result.filter { pr in
+                pr.title.localizedCaseInsensitiveContains(query) ||
+                "#\(pr.number)".contains(query) ||
+                pr.repoName.localizedCaseInsensitiveContains(query) ||
+                pr.headRefName.localizedCaseInsensitiveContains(query)
+            }
+        }
+    }
+
+    /// Non-nil when useRegex is on and searchText doesn't compile. Drives the inline
+    /// error indicator next to the regex toggle.
+    var regexError: String? {
+        guard useRegex, !searchText.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        do {
+            _ = try NSRegularExpression(pattern: searchText, options: [.caseInsensitive])
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// Validates credentials by reading the user's login. Starts the monitor only on success.

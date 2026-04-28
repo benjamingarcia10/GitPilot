@@ -18,15 +18,17 @@ final class PRMonitor: ObservableObject {
 
     /// Called immediately before each refresh starts. AppState uses this to clear
     /// expired snoozes so the upcoming pass treats those PRs as fresh.
-    var willRefresh: () -> Void = {}
+    /// Typed as @MainActor so the actor contract is part of the type — making
+    /// it impossible to accidentally call from a background context.
+    var willRefresh: @MainActor () -> Void = {}
 
     /// Called after each per-PR enrichment is applied. AppState computes transitions,
     /// fires notifications, and runs auto-rebase logic in this callback.
-    var onPRUpdated: (PullRequest) async -> Void = { _ in }
+    var onPRUpdated: @MainActor (PullRequest) async -> Void = { _ in }
 
     /// Called once after a refresh completes, with the set of currently-live PR ids.
     /// AppState uses this to drop dedupe entries for PRs that closed/merged.
-    var onListSettled: (Set<String>) -> Void = { _ in }
+    var onListSettled: @MainActor (Set<String>) -> Void = { _ in }
 
     init(client: GitHubClient, pollInterval: TimeInterval = 30) {
         self.client = client
@@ -77,11 +79,7 @@ final class PRMonitor: ObservableObject {
             prs = lightPRs.map { fresh in
                 guard let prev = previousById[fresh.id] else { return fresh }
                 var merged = fresh
-                merged.mergeable = prev.mergeable
-                merged.mergeStateStatus = prev.mergeStateStatus
-                merged.reviewDecision = prev.reviewDecision
-                merged.checkRollupState = prev.checkRollupState
-                merged.checks = prev.checks
+                merged.carryForwardEnrichment(from: prev)
                 // allowedMergeMethods comes from the fresh phase-1 query, no carry-forward needed.
                 return merged
             }
@@ -89,13 +87,16 @@ final class PRMonitor: ObservableObject {
             lastRefresh = Date()
 
             // Enrich in parallel. Each task awaits one cheap GraphQL call and updates one row.
+            // Per-task cancellation checks ensure a stop()-then-restart cycle doesn't
+            // publish stale enrichment after the new refresh has started.
             let enrichStart = Date()
             await withTaskGroup(of: Void.self) { group in
                 for pr in lightPRs {
                     group.addTask { [weak self] in
-                        guard let self else { return }
+                        guard let self, !Task.isCancelled else { return }
                         do {
                             let enrichment = try await self.client.enrichPR(nodeId: pr.nodeId)
+                            guard !Task.isCancelled else { return }
                             await self.applyEnrichment(prId: pr.id, enrichment: enrichment)
                         } catch let err as GitHubClientError where err.isAuthError {
                             await self.handleAuthError(err.localizedDescription)
@@ -123,11 +124,7 @@ final class PRMonitor: ObservableObject {
     private func applyEnrichment(prId: String, enrichment: PREnrichment) async {
         guard let idx = prs.firstIndex(where: { $0.id == prId }) else { return }
         var pr = prs[idx]
-        pr.mergeable = enrichment.mergeable
-        pr.mergeStateStatus = enrichment.mergeStateStatus
-        pr.reviewDecision = enrichment.reviewDecision
-        pr.checkRollupState = enrichment.checkRollupState
-        pr.checks = enrichment.checks
+        pr.apply(enrichment)
         prs[idx] = pr
         await onPRUpdated(pr)
     }
@@ -135,7 +132,7 @@ final class PRMonitor: ObservableObject {
     // MARK: - Auth error plumbing
 
     /// Set by AppState; flips authStatus and stops the loop on 401.
-    var onAuthError: (String) -> Void = { _ in }
+    var onAuthError: @MainActor (String) -> Void = { _ in }
 
     private func handleAuthError(_ reason: String) {
         stop()

@@ -4,20 +4,50 @@ import AppKit
 @main
 struct GitPilotApp: App {
     @StateObject private var state = AppState()
+    private let terminationObserver: TerminationObserver
 
     init() {
-        // Hide Dock icon — this is a menu bar app.
         NSApp?.setActivationPolicy(.accessory)
+        terminationObserver = TerminationObserver()
     }
 
     var body: some Scene {
         MenuBarExtra {
             MenuContent(state: state)
+                .onAppear { terminationObserver.bind(to: state) }
         } label: {
             MenuBarLabel(monitor: state.monitor)
         }
         .menuBarExtraStyle(.window)
         .commands {}
+    }
+}
+
+/// Observes app-termination notifications so we can flush any pending save
+/// to disk before the process exits. Without this, a quit during the 250ms
+/// debounce window would lose the most recent state change.
+private final class TerminationObserver {
+    private weak var state: AppState?
+    private var observer: NSObjectProtocol?
+
+    init() {
+        observer = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            // The notification fires synchronously on the main thread during
+            // app termination. We hop onto the MainActor explicitly so the
+            // call to flushPendingSave (which writes the JSON file) blocks
+            // termination until it returns — losing the most recent state
+            // change to a 250ms debounce would be worse than a brief delay.
+            MainActor.assumeIsolated { self?.state?.flushPendingSave() }
+        }
+    }
+
+    func bind(to state: AppState) { self.state = state }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
     }
 }
 
@@ -87,7 +117,7 @@ private struct MenuContent: View {
                 Spacer()
                 RefreshButton(
                     isRefreshing: monitor.isRefreshing || state.isLoadingReviewing,
-                    isEnabled: state.authStatus == authenticatedShape(state.authStatus),
+                    isEnabled: state.authStatus.isAuthenticated,
                     action: {
                         Task {
                             switch state.currentTab {
@@ -271,13 +301,6 @@ private struct MenuContent: View {
                 .frame(maxHeight: 500)
             }
         }
-    }
-
-    /// Helper so the disabled-binding above type-checks; SwiftUI doesn't like
-    /// pattern matching inside a boolean expression directly.
-    private func authenticatedShape(_ status: AuthStatus) -> AuthStatus {
-        if case .authenticated = status { return status }
-        return .unknown
     }
 
     /// `now` is passed in so the string re-evaluates against the TimelineView's tick,
@@ -580,7 +603,7 @@ private struct PRRow: View {
                 state.openWorktreeInEditor(prId: pr.id)
             }
             Button("Remove worktree") {
-                state.removeWorktree(prId: pr.id)
+                Task { await state.removeWorktree(prId: pr.id) }
             }
         } else {
             let inFlight = state.worktreeInFlight.contains(pr.id)
@@ -932,6 +955,7 @@ private struct WorktreeRow: View {
     let status: WorktreeStatus
     @ObservedObject var state: AppState
     let onRefresh: () -> Void
+    @State private var confirmingDirtyRemove = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -950,21 +974,46 @@ private struct WorktreeRow: View {
             .buttonStyle(.hover)
             .font(.caption)
             Button(role: .destructive) {
-                let force: Bool = {
-                    if case .dirty = status { return true }
-                    return false
-                }()
-                state.removeWorktree(prId: prId, force: force)
-                onRefresh()
+                // Dirty worktrees require explicit confirmation to avoid losing
+                // uncommitted changes. Clean ones remove immediately.
+                if case .dirty = status {
+                    confirmingDirtyRemove = true
+                } else {
+                    Task {
+                        await state.removeWorktree(prId: prId, force: false)
+                        onRefresh()
+                    }
+                }
             } label: {
                 Text("Remove")
             }
             .buttonStyle(.hover)
             .font(.caption)
+            .confirmationDialog(
+                "Worktree has uncommitted changes. Remove anyway?",
+                isPresented: $confirmingDirtyRemove
+            ) {
+                Button("Remove and discard changes", role: .destructive) {
+                    Task {
+                        await state.removeWorktree(prId: prId, force: true)
+                        onRefresh()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(dirtyMessage)
+            }
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 4)
         .hoverHighlight(cornerRadius: 5)
+    }
+
+    private var dirtyMessage: String {
+        if case .dirty(let summary) = status {
+            return "Discarding will permanently delete uncommitted changes: \(summary)"
+        }
+        return ""
     }
 
     private var prTitle: String {

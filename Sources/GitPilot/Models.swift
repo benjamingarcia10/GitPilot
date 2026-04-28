@@ -34,6 +34,11 @@ enum AuthStatus: Equatable {
     case unknown
     case authenticated(login: String)
     case needsReauth(reason: String)
+
+    var isAuthenticated: Bool {
+        if case .authenticated = self { return true }
+        return false
+    }
 }
 
 /// Status of a single CI check or status context on a PR.
@@ -192,4 +197,26 @@ struct PREnrichment: Equatable {
     let reviewDecision: String?
     let checkRollupState: CheckRollupState
     let checks: [PRCheck]
+}
+
+extension PullRequest {
+    /// Apply enrichment results from a phase-2 query.
+    mutating func apply(_ enrichment: PREnrichment) {
+        mergeable = enrichment.mergeable
+        mergeStateStatus = enrichment.mergeStateStatus
+        reviewDecision = enrichment.reviewDecision
+        checkRollupState = enrichment.checkRollupState
+        checks = enrichment.checks
+    }
+
+    /// Copy the slow-to-compute enrichment fields from a previous snapshot of
+    /// the same PR. Used between refreshes so rows don't flash to "loading"
+    /// while phase-2 enrichment fetches fresh data.
+    mutating func carryForwardEnrichment(from old: PullRequest) {
+        mergeable = old.mergeable
+        mergeStateStatus = old.mergeStateStatus
+        reviewDecision = old.reviewDecision
+        checkRollupState = old.checkRollupState
+        checks = old.checks
+    }
 }

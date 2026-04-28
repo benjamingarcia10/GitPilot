@@ -82,7 +82,7 @@ final class AppState: ObservableObject {
         }
         // Wire monitor callbacks. AppState owns all the policy logic now.
         self.monitor.onAuthError = { [weak self] reason in
-            Task { @MainActor in self?.authStatus = .needsReauth(reason: reason) }
+            Task { @MainActor in self?.applyAuthFailure(reason) }
         }
         self.monitor.willRefresh = { [weak self] in
             self?.cleanExpiredSnoozes()
@@ -101,14 +101,7 @@ final class AppState: ObservableObject {
         guard !didBootstrap else { return }
         didBootstrap = true
         await notifications.bootstrap()
-        await checkAuth()
-        // Pre-fetch the viewer's team memberships so reviewing pills are filtered
-        // correctly on the very first refresh. Failure is non-fatal — refreshReviewing
-        // will retry hourly.
-        if case .authenticated = authStatus {
-            await refreshTeamSlugsIfStale()
-        }
-        startReviewingPolling()
+        await checkAuth()  // checkAuth starts both monitor and reviewing polling on success
     }
 
     /// Re-fetches viewer's team slugs if the cache is older than `teamSlugRefreshInterval`
@@ -155,30 +148,65 @@ final class AppState: ObservableObject {
         do {
             let login = try await client.currentLogin()
             guard !login.isEmpty else {
-                authStatus = .needsReauth(reason: "gh returned empty login. Run `gh auth login`.")
-                monitor.stop()
+                applyAuthFailure("gh returned empty login. Run `gh auth login`.")
                 return
             }
             authStatus = .authenticated(login: login)
+            await refreshTeamSlugsIfStale()
             monitor.start()
+            startReviewingPolling()
         } catch let err as GitHubClientError {
-            authStatus = .needsReauth(reason: err.localizedDescription)
-            monitor.stop()
+            applyAuthFailure(err.localizedDescription)
         } catch {
-            authStatus = .needsReauth(reason: error.localizedDescription)
-            monitor.stop()
+            applyAuthFailure(error.localizedDescription)
         }
+    }
+
+    /// Centralizes the auth-failure side effects so we don't forget to stop
+    /// either polling loop. Also clears team-slug cache so a re-auth as a
+    /// different account doesn't reuse the previous user's team filter.
+    private func applyAuthFailure(_ reason: String) {
+        authStatus = .needsReauth(reason: reason)
+        monitor.stop()
+        stopReviewingPolling()
+        viewerTeamSlugs.removeAll()
+        teamSlugsLastRefreshed = nil
     }
 
     // MARK: - Persisted-state mutation helpers
 
     /// Single mutation entry point. All state changes go through this so we
-    /// always save afterward and bump the @Published cleanly for SwiftUI.
+    /// always publish + schedule a save. Saves are coalesced — multiple mutate
+    /// calls in the same ~250ms window write to disk once, instead of 25× on
+    /// a refresh that updates dozens of dedupe + activity entries.
     private func mutate(_ block: (inout PersistedState) -> Void) {
         var s = persistedState
         block(&s)
         persistedState = s
-        PersistenceStore.save(s)
+        scheduleSave()
+    }
+
+    /// Save coalescing. The actual disk write happens at most once per saveDebounce
+    /// interval, plus once on app termination so nothing in flight is dropped.
+    private static let saveDebounce: TimeInterval = 0.25
+    private var pendingSaveTask: Task<Void, Never>?
+
+    private func scheduleSave() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.saveDebounce * 1_000_000_000))
+            if Task.isCancelled { return }
+            guard let self else { return }
+            let snapshot = self.persistedState
+            // Move the encode + write off the main actor.
+            await Task.detached { PersistenceStore.save(snapshot) }.value
+        }
+    }
+
+    /// Synchronous flush — called from app termination so nothing pending is dropped.
+    func flushPendingSave() {
+        pendingSaveTask?.cancel()
+        PersistenceStore.save(persistedState)
     }
 
     // MARK: - Pin / snooze / auto-rebase API for the UI
@@ -194,7 +222,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func lookupPR(_ prId: String) -> PullRequest? {
+    /// Single source of truth for "find a PR by id" — checks My PRs first, then
+    /// Reviewing. Use this everywhere, including from the actions menu so the
+    /// context menu on a Reviewing-tab row can act on its PR (the previous
+    /// `monitor.prs.first(where:)`-only callers silently no-op'd on Reviewing PRs).
+    func lookupPR(_ prId: String) -> PullRequest? {
         monitor.prs.first(where: { $0.id == prId })
             ?? reviewingPRs.first(where: { $0.id == prId })
     }
@@ -251,7 +283,7 @@ final class AppState: ObservableObject {
     /// our flag regardless.
     func toggleAutoMerge(_ prId: String) async {
         guard !autoMergeInFlight.contains(prId) else { return }
-        guard let pr = monitor.prs.first(where: { $0.id == prId }) else { return }
+        guard let pr = lookupPR(prId) else { return }
         autoMergeInFlight.insert(prId)
         defer { autoMergeInFlight.remove(prId) }
         let isEnabling = !persistedState.autoMerge.contains(prId)
@@ -387,10 +419,21 @@ final class AppState: ObservableObject {
         do {
             let prs = try await client.fetchReviewingPRs(viewerTeamSlugs: viewerTeamSlugs)
             try Task.checkCancellation()
-            var enriched = prs
+            // Carry forward enrichment from the previous snapshot so rows don't
+            // flash to "loading" while phase-2 fetches in the background.
+            let previousById = Dictionary(uniqueKeysWithValues: reviewingPRs.map { ($0.id, $0) })
+            var enriched = prs.map { fresh -> PullRequest in
+                guard let prev = previousById[fresh.id] else { return fresh }
+                var merged = fresh
+                merged.carryForwardEnrichment(from: prev)
+                return merged
+            }
+            // Show the carried-forward list immediately, then fill in fresh data per-PR.
+            reviewingPRs = enriched
             await withTaskGroup(of: (Int, PREnrichment?).self) { group in
                 for (idx, pr) in prs.enumerated() {
                     group.addTask { [client = self.client] in
+                        if Task.isCancelled { return (idx, nil) }
                         do {
                             let e = try await client.enrichPR(nodeId: pr.nodeId)
                             return (idx, e)
@@ -400,12 +443,8 @@ final class AppState: ObservableObject {
                     }
                 }
                 for await (idx, e) in group {
-                    guard let e else { continue }
-                    enriched[idx].mergeable = e.mergeable
-                    enriched[idx].mergeStateStatus = e.mergeStateStatus
-                    enriched[idx].reviewDecision = e.reviewDecision
-                    enriched[idx].checkRollupState = e.checkRollupState
-                    enriched[idx].checks = e.checks
+                    guard let e, !Task.isCancelled else { continue }
+                    enriched[idx].apply(e)
                 }
             }
             reviewingPRs = enriched
@@ -413,8 +452,7 @@ final class AppState: ObservableObject {
             // Outer task was cancelled — happens when SwiftUI views re-render or
             // the user switches tabs mid-fetch. Not a real error; stay silent.
         } catch let err as GitHubClientError where err.isAuthError {
-            stopReviewingPolling()
-            authStatus = .needsReauth(reason: err.localizedDescription)
+            applyAuthFailure(err.localizedDescription)
         } catch {
             // URLSession also surfaces cancellation as -999. Silence those too.
             let nsErr = error as NSError
@@ -425,7 +463,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Worktree actions
 
-    /// Create + open a worktree for the PR. Called from row's "Create worktree" action.
+    /// Create + open a worktree for the PR. The actual `git fetch` + `git worktree
+    /// add` runs on a detached task so the menu UI stays responsive — these can
+    /// take 10s+ on slow connections. The `worktreeInFlight` flag keeps the
+    /// context-menu button disabled while the create runs.
     func createAndOpenWorktree(for pr: PullRequest) async {
         guard !worktreeInFlight.contains(pr.id) else { return }
         worktreeInFlight.insert(pr.id)
@@ -442,10 +483,15 @@ final class AppState: ObservableObject {
             root: persistedState.settings.worktreeRoot,
             repoOwner: pr.repoOwner, repoName: pr.repoName, branch: pr.headRefName
         )
+        let branch = pr.headRefName
+        let editor = persistedState.settings.editorCommand
         do {
-            try WorktreeManager.create(repoPath: repoPath, worktreePath: worktreePath, branch: pr.headRefName)
+            try await Task.detached {
+                _ = try WorktreeManager.create(repoPath: repoPath, worktreePath: worktreePath, branch: branch)
+            }.value
             mutate { $0.worktrees[pr.id] = worktreePath.path }
-            WorktreeManager.openInEditor(worktreePath, command: persistedState.settings.editorCommand)
+            // Editor open is also subprocess work; detach it.
+            Task.detached { WorktreeManager.openInEditor(worktreePath, command: editor) }
         } catch {
             Log.debug("createWorktree \(pr.id) failed: \(error.localizedDescription)")
             await notifications.notifyAutoRebaseFailed(pr: pr, reason: error.localizedDescription)
@@ -455,17 +501,23 @@ final class AppState: ObservableObject {
     /// Open an already-created worktree in the configured editor.
     func openWorktreeInEditor(prId: String) {
         guard let pathString = persistedState.worktrees[prId] else { return }
-        WorktreeManager.openInEditor(URL(fileURLWithPath: pathString), command: persistedState.settings.editorCommand)
+        let url = URL(fileURLWithPath: pathString)
+        let editor = persistedState.settings.editorCommand
+        Task.detached { WorktreeManager.openInEditor(url, command: editor) }
     }
 
     /// Remove a worktree. `force` only set after the user confirms past a dirty state.
-    func removeWorktree(prId: String, force: Bool = false) {
+    /// Subprocess work runs detached so the menu doesn't freeze.
+    func removeWorktree(prId: String, force: Bool = false) async {
         guard let pathString = persistedState.worktrees[prId] else { return }
-        guard let pr = monitor.prs.first(where: { $0.id == prId })
-              ?? reviewingPRs.first(where: { $0.id == prId })
-        else {
-            // PR no longer in either list; we can still remove the worktree if we know the path.
-            removeWorktreeAtPath(pathString, prId: prId, repoOwner: nil, repoName: nil, force: force)
+        let worktreeURL = URL(fileURLWithPath: pathString)
+
+        guard let pr = lookupPR(prId) else {
+            // PR no longer in either list; remove the worktree by path only.
+            await Task.detached {
+                try? FileManager.default.removeItem(at: worktreeURL)
+            }.value
+            mutate { $0.worktrees.removeValue(forKey: prId) }
             return
         }
         guard let repoPath = WorktreeManager.locateLocalRepo(owner: pr.repoOwner, name: pr.repoName) else {
@@ -473,21 +525,12 @@ final class AppState: ObservableObject {
             return
         }
         do {
-            try WorktreeManager.remove(repoPath: repoPath, worktreePath: URL(fileURLWithPath: pathString), force: force)
+            try await Task.detached {
+                try WorktreeManager.remove(repoPath: repoPath, worktreePath: worktreeURL, force: force)
+            }.value
             mutate { $0.worktrees.removeValue(forKey: prId) }
         } catch {
             Log.debug("removeWorktree \(prId) failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func removeWorktreeAtPath(_ pathString: String, prId: String, repoOwner: String?, repoName: String?, force: Bool) {
-        // Best-effort path-only removal when we no longer have the PR in our state.
-        let path = URL(fileURLWithPath: pathString)
-        do {
-            try FileManager.default.removeItem(at: path)
-            mutate { $0.worktrees.removeValue(forKey: prId) }
-        } catch {
-            Log.debug("removeWorktreeAtPath \(prId) failed: \(error.localizedDescription)")
         }
     }
 
@@ -563,19 +606,51 @@ final class AppState: ObservableObject {
         Log.debug("snooze: expired \(expired.count) — will re-evaluate next refresh")
     }
 
+    /// Records an activity entry for each PR that just appeared or disappeared
+    /// from the My PRs list. Skipped on the very first refresh to avoid flooding
+    /// the timeline with "appeared" entries for every existing PR at app launch.
+    private var firstListSettleSeen = false
+    private var lastSeenLiveIds: Set<String> = []
+
+    private func recordListChurn(liveIds: Set<String>) {
+        defer {
+            firstListSettleSeen = true
+            lastSeenLiveIds = liveIds
+        }
+        guard firstListSettleSeen else { return }
+
+        let appeared = liveIds.subtracting(lastSeenLiveIds)
+        for id in appeared {
+            if let pr = monitor.prs.first(where: { $0.id == id }) {
+                record(.appeared, pr: pr)
+            }
+        }
+        let disappeared = lastSeenLiveIds.subtracting(liveIds)
+        for id in disappeared {
+            // PR is gone from the list — we already lost its title. Use the last
+            // observed title from previous monitor.prs if we still have it.
+            recordActivity(prId: id, prNumber: 0, prTitle: id, kind: .disappeared)
+        }
+    }
+
     /// Drop dedupe entries for PRs that no longer appear in the list (closed/merged).
     /// Pin/snooze/autoRebase entries are intentionally preserved across close-and-reopen.
+    /// Also prunes the ephemeral expanded-row set so it doesn't grow unboundedly
+    /// over a long session.
     private func cleanDedupeForClosedPRs(liveIds: Set<String>) {
+        recordListChurn(liveIds: liveIds)
         let staleKeys = persistedState.notifiedNeedsUpdate.union(
                           persistedState.notifiedReadyToMerge).union(
                           persistedState.notifiedBlockedByTests)
             .subtracting(liveIds)
-        guard !staleKeys.isEmpty else { return }
-        mutate { s in
-            s.notifiedNeedsUpdate.subtract(staleKeys)
-            s.notifiedReadyToMerge.subtract(staleKeys)
-            s.notifiedBlockedByTests.subtract(staleKeys)
+        if !staleKeys.isEmpty {
+            mutate { s in
+                s.notifiedNeedsUpdate.subtract(staleKeys)
+                s.notifiedReadyToMerge.subtract(staleKeys)
+                s.notifiedBlockedByTests.subtract(staleKeys)
+            }
         }
+        expandedPRs.formIntersection(liveIds.union(reviewingPRs.map(\.id)))
     }
 
     // MARK: - PR-update reactor
@@ -675,7 +750,7 @@ final class AppState: ObservableObject {
     /// Manual rebase via the inline button or the notification action.
     func rebase(prId: String) async {
         guard !rebaseInFlight.contains(prId) else { return }
-        guard let pr = monitor.prs.first(where: { $0.id == prId }) else { return }
+        guard let pr = lookupPR(prId) else { return }
         rebaseInFlight.insert(prId)
         defer { rebaseInFlight.remove(prId) }
         do {
@@ -872,7 +947,7 @@ final class AppState: ObservableObject {
         case .updateBranch(let prId):
             await rebase(prId: prId)
         case .openPR(let prId):
-            if let pr = monitor.prs.first(where: { $0.id == prId }) {
+            if let pr = lookupPR(prId) {
                 NSWorkspace.shared.open(pr.url)
             }
         case .dismiss:

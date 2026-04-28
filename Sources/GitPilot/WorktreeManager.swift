@@ -10,8 +10,12 @@ enum WorktreeStatus: Equatable {
 
 /// Creates, opens, and removes worktrees that GitPilot manages.
 /// Operations shell out to `git`; the caller is responsible for persisting paths.
-@MainActor
-final class WorktreeManager {
+///
+/// Not @MainActor because every method either is pure (path resolution) or
+/// blocks on `Process()` — `git fetch` over the network can take 10s+, which
+/// would freeze the menu UI if it ran on the main actor. Callers should
+/// invoke I/O methods via `Task.detached` so the menu stays responsive.
+enum WorktreeManager {
 
     /// Resolves a worktree path for a given repo + branch, anchored at the
     /// configured root (with `~` expansion). Falls back to `~/worktrees/gitpilot`.
@@ -118,15 +122,24 @@ final class WorktreeManager {
     }
 
     /// Returns the actual command to invoke. "auto" probes which editor's CLI is on PATH.
+    /// Cached in `autoEditorCommand` so we don't re-probe on every menu action.
     static func resolveEditorCommand(_ command: String) -> String {
         if command != "auto" { return command }
+        if let cached = autoEditorCommand { return cached }
         // Probe in preference order: Cursor → VSCode → Sublime. Each ships its own
         // CLI helper that opens a directory. If none found, return "finder" sentinel.
         for candidate in ["cursor", "code", "subl"] {
-            if commandExists(candidate) { return candidate }
+            if commandExists(candidate) {
+                autoEditorCommand = candidate
+                return candidate
+            }
         }
+        autoEditorCommand = "finder"
         return "finder"
     }
+
+    /// Cached result of probing for an editor on PATH. Populated lazily.
+    private static var autoEditorCommand: String?
 
     private static func commandExists(_ command: String) -> Bool {
         let proc = Process()

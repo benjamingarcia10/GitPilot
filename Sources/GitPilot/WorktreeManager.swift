@@ -11,10 +11,10 @@ enum WorktreeStatus: Equatable {
 /// Creates, opens, and removes worktrees that GitPilot manages.
 /// Operations shell out to `git`; the caller is responsible for persisting paths.
 ///
-/// Not @MainActor because every method either is pure (path resolution) or
-/// blocks on `Process()` — `git fetch` over the network can take 10s+, which
-/// would freeze the menu UI if it ran on the main actor. Callers should
-/// invoke I/O methods via `Task.detached` so the menu stays responsive.
+/// I/O methods (`create`, `remove`, `status`) are `async` and use a continuation
+/// over `Process.terminationHandler` so the calling task suspends instead of
+/// blocking a cooperative-pool thread on `waitUntilExit`. Callers should
+/// `await` them directly — no `Task.detached` wrapper needed.
 enum WorktreeManager {
 
     /// Resolves a worktree path for a given repo + branch, anchored at the

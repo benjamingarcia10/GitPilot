@@ -48,6 +48,14 @@ final class AppState: ObservableObject {
     /// putting `.task` on a flickering conditional and re-triggering loads in a loop.
     @Published private(set) var didLoadReviewingOnce = false
 
+    /// True while `checkAuth()` is running. Drives the auth-banner Retry button so
+    /// a spam-click doesn't fan out N concurrent `gh` invocations + monitor restarts.
+    @Published private(set) var isCheckingAuth = false
+
+    /// True while a test-notification batch is being scheduled. Without this, a
+    /// spam-click on "Send test notification" would queue 3·N notifications.
+    @Published private(set) var isFiringTestNotifications = false
+
     /// Cached team slugs the viewer is a member of. Used to filter team-based
     /// reviewer pills on the Reviewing tab.
     private var viewerTeamSlugs: Set<String> = []
@@ -65,6 +73,12 @@ final class AppState: ObservableObject {
 
     /// Cache of which worktree we're currently creating, by PR id.
     @Published private(set) var worktreeInFlight: Set<String> = []
+
+    /// Worktree-remove in flight, by PR id. Separate from the create set because
+    /// the two can't both be in flight for the same PR (existence of a worktree
+    /// determines which button the UI shows), but keeping them distinct lets the
+    /// labels read accurately ("Removing…" vs "Creating…").
+    @Published private(set) var worktreeRemoveInFlight: Set<String> = []
 
     /// All persisted state. Mutated only via mutate(_:) which also schedules a save.
     @Published private(set) var persistedState: PersistedState = PersistedState()
@@ -150,6 +164,9 @@ final class AppState: ObservableObject {
     }
 
     func checkAuth() async {
+        guard !isCheckingAuth else { return }
+        isCheckingAuth = true
+        defer { isCheckingAuth = false }
         do {
             let login = try await client.currentLogin()
             guard !login.isEmpty else {
@@ -296,11 +313,12 @@ final class AppState: ObservableObject {
             // Pick the right method for this repo: per-repo override > global default
             // > first allowed. The repo's allowed methods come from the phase-1 query.
             guard let method = chosenMergeMethod(for: pr) else {
-                Log.debug("auto-merge \(prId) skipped: repo allows no merge methods")
-                await notifications.notifyAutoRebaseFailed(
-                    pr: pr,
-                    reason: "Repo \(pr.repoOwner)/\(pr.repoName) allows no merge methods."
-                )
+                let reason = "Repo \(pr.repoOwner)/\(pr.repoName) allows no merge methods."
+                Log.debug("auto-merge \(prId) skipped: \(reason)")
+                record(.autoMergeFailed, pr: pr, detail: reason)
+                if persistedState.settings.enableAutoMergeFailureNotification {
+                    await notifications.notifyAutoMergeFailed(pr: pr, reason: reason)
+                }
                 return
             }
             // Always set the flag — the client-side fallback handles the case where
@@ -321,11 +339,16 @@ final class AppState: ObservableObject {
         } else {
             mutate { $0.autoMerge.remove(prId) }
             record(.autoMergeDisabled, pr: pr)
-            // Best-effort cancel of GitHub-side auto-merge. Errors silently if
-            // it wasn't armed there in the first place.
+            // Best-effort cancel of GitHub-side auto-merge. If GitHub-side wasn't
+            // armed in the first place this errors with a benign "not enabled"
+            // message — common, no need to surface in activity.
             do {
                 try await client.disableAutoMerge(prNodeId: pr.nodeId)
             } catch {
+                let msg = error.localizedDescription.lowercased()
+                if !msg.contains("not enabled") && !msg.contains("not auto") {
+                    record(.autoMergeFailed, pr: pr, detail: "GitHub-side disable: \(error.localizedDescription)")
+                }
                 Log.debug("auto-merge \(prId) GitHub-side disable: \(error.localizedDescription)")
             }
         }
@@ -344,7 +367,9 @@ final class AppState: ObservableObject {
         defer { autoMergeInFlight.remove(pr.id) }
 
         guard let method = chosenMergeMethod(for: pr) else {
-            Log.debug("auto-merge \(pr.id) client-side: no allowed merge method, dropping flag")
+            let reason = "Repo \(pr.repoOwner)/\(pr.repoName) allows no merge methods."
+            Log.debug("auto-merge \(pr.id) client-side: \(reason), dropping flag")
+            record(.autoMergeFailed, pr: pr, detail: reason)
             mutate { $0.autoMerge.remove(pr.id) }
             return
         }
@@ -352,24 +377,47 @@ final class AppState: ObservableObject {
             try await client.mergePullRequest(prNodeId: pr.nodeId, method: method)
             Log.debug("auto-merge \(pr.id) merged client-side")
             record(.merged, pr: pr, detail: method.rawValue)
+            if persistedState.settings.enableAutoMergeCompletedNotification {
+                await notifications.notifyAutoMergeCompleted(pr: pr, method: method.label)
+            }
             // Clear the flag now that the PR is gone from the open list.
             mutate { $0.autoMerge.remove(pr.id) }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await monitor.refresh()
         } catch {
-            // "already merged" — GitHub-side auto-merge or a manual click won the race. Clean up.
             let msg = error.localizedDescription.lowercased()
-            if msg.contains("already merged") || msg.contains("not mergeable") {
+            if msg.contains("already merged") {
+                // GitHub-side auto-merge or a manual click won the race. From the
+                // user's perspective this is still a successful auto-merge — record
+                // and notify accordingly.
                 Log.debug("auto-merge \(pr.id) already merged elsewhere, clearing flag")
+                record(.merged, pr: pr, detail: "\(method.rawValue) (server-side)")
+                if persistedState.settings.enableAutoMergeCompletedNotification {
+                    await notifications.notifyAutoMergeCompleted(pr: pr, method: method.label)
+                }
+                mutate { $0.autoMerge.remove(pr.id) }
+                return
+            }
+            if msg.contains("not mergeable") {
+                // GitHub disagreed with our local `isReadyToMerge` at merge time.
+                // Drop the flag rather than retry every refresh — re-enabling
+                // auto-merge is one click if the user still wants it. Recording
+                // here so the user can see why their auto-merge stopped firing.
+                Log.debug("auto-merge \(pr.id) not mergeable at merge time, dropping flag")
+                record(.autoMergeFailed, pr: pr, detail: "GitHub reports not mergeable; auto-merge cleared")
+                if persistedState.settings.enableAutoMergeFailureNotification {
+                    await notifications.notifyAutoMergeFailed(
+                        pr: pr,
+                        reason: "GitHub reports not mergeable. Re-enable auto-merge if you want to retry."
+                    )
+                }
                 mutate { $0.autoMerge.remove(pr.id) }
                 return
             }
             Log.debug("auto-merge \(pr.id) client-side merge failed: \(error.localizedDescription)")
-            if persistedState.settings.enableAutoRebaseFailureNotification {
-                await notifications.notifyAutoRebaseFailed(
-                    pr: pr,
-                    reason: "Auto-merge failed: \(error.localizedDescription)"
-                )
+            record(.autoMergeFailed, pr: pr, detail: error.localizedDescription)
+            if persistedState.settings.enableAutoMergeFailureNotification {
+                await notifications.notifyAutoMergeFailed(pr: pr, reason: error.localizedDescription)
             }
         }
     }
@@ -484,10 +532,9 @@ final class AppState: ObservableObject {
 
         guard let repoPath = WorktreeManager.locateLocalRepo(owner: pr.repoOwner, name: pr.repoName) else {
             let probed = WorktreeManager.repoSearchCandidates(owner: pr.repoOwner, name: pr.repoName)
-            await notifications.notifyAutoRebaseFailed(
-                pr: pr,
-                reason: "No local checkout for \(pr.repoOwner)/\(pr.repoName). Probed: \(probed.joined(separator: ", "))"
-            )
+            let reason = "No local checkout for \(pr.repoOwner)/\(pr.repoName). Probed: \(probed.joined(separator: ", "))"
+            record(.worktreeCreateFailed, pr: pr, detail: reason)
+            await notifications.notifyAutoRebaseFailed(pr: pr, reason: reason)
             return
         }
         let worktreePath = WorktreeManager.resolvePath(
@@ -505,6 +552,7 @@ final class AppState: ObservableObject {
             WorktreeManager.openInEditor(worktreePath, command: editor)
         } catch {
             Log.debug("createWorktree \(pr.id) failed: \(error.localizedDescription)")
+            record(.worktreeCreateFailed, pr: pr, detail: error.localizedDescription)
             await notifications.notifyAutoRebaseFailed(pr: pr, reason: error.localizedDescription)
         }
     }
@@ -520,7 +568,10 @@ final class AppState: ObservableObject {
 
     /// Remove a worktree. `force` only set after the user confirms past a dirty state.
     func removeWorktree(prId: String, force: Bool = false) async {
+        guard !worktreeRemoveInFlight.contains(prId) else { return }
         guard let pathString = persistedState.worktrees[prId] else { return }
+        worktreeRemoveInFlight.insert(prId)
+        defer { worktreeRemoveInFlight.remove(prId) }
         let worktreeURL = URL(fileURLWithPath: pathString)
 
         guard let pr = lookupPR(prId) else {
@@ -538,6 +589,7 @@ final class AppState: ObservableObject {
             mutate { $0.worktrees.removeValue(forKey: prId) }
         } catch {
             Log.debug("removeWorktree \(prId) failed: \(error.localizedDescription)")
+            record(.worktreeRemoveFailed, pr: pr, detail: error.localizedDescription)
         }
     }
 
@@ -710,17 +762,24 @@ final class AppState: ObservableObject {
 
         // READY TO MERGE
         if pr.isReadyToMerge {
+            let isAutoMerging = persistedState.autoMerge.contains(pr.id)
             if !persistedState.notifiedReadyToMerge.contains(pr.id) {
                 mutate { $0.notifiedReadyToMerge.insert(pr.id) }
                 record(.becameReady, pr: pr)
-                if persistedState.settings.enableReadyNotification {
+                // Suppress the "Ready to merge" ping when auto-merge is on for
+                // this PR — the user opted in to silent merging; pinging them
+                // about something they've delegated away is exactly the noise
+                // they're trying to escape. The activity entry above still
+                // records the transition, and the merge result (success or
+                // failure) gets its own activity entry below.
+                if persistedState.settings.enableReadyNotification && !isAutoMerging {
                     await notifications.notifyReadyToMerge(pr: pr)
                 }
             }
             // Auto-merge fallback: if user opted in but GitHub-side wasn't armed,
             // we merge from here. Safe even if GitHub-side IS armed — GitHub usually
             // wins the race and we get an "already merged" no-op.
-            if persistedState.autoMerge.contains(pr.id) {
+            if isAutoMerging {
                 await runClientSideMergeIfFlagged(pr)
             }
         } else {
@@ -781,7 +840,11 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await monitor.refresh()
         } catch {
+            // Surface the failure in activity so the user can see why nothing
+            // happened — the inline button just snapping back to "Rebase" with
+            // only a stderr log was the previous (silent) failure mode.
             Log.debug("rebase \(prId) failed: \(error.localizedDescription)")
+            record(.rebaseFailed, pr: pr, detail: error.localizedDescription)
         }
     }
 
@@ -794,6 +857,9 @@ final class AppState: ObservableObject {
     /// the user clicks an action button. If you ever add a network-lookup fallback,
     /// gate it on a non-test id prefix so we don't 404 on a synthetic.
     func fireTestNotifications() async {
+        guard !isFiringTestNotifications else { return }
+        isFiringTestNotifications = true
+        defer { isFiringTestNotifications = false }
         let pr = PullRequest(
             nodeId: "__gitpilot_test_node__",
             number: 0,

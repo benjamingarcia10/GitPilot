@@ -11,9 +11,13 @@ struct ActivityEvent: Codable, Equatable, Identifiable {
         case becameTestsFailing  // PR transitioned to blockedByTests
         case becameConflicts     // PR transitioned to merge conflict
         case rebased             // user-initiated rebase succeeded
+        case rebaseFailed        // user-initiated rebase failed
         case autoRebased         // auto-rebase succeeded
         case autoRebaseFailed    // auto-rebase mutation failed
         case merged              // client-side merge succeeded
+        case autoMergeFailed     // auto-merge mutation or precondition failed
+        case worktreeCreateFailed
+        case worktreeRemoveFailed
         case pinned
         case unpinned
         case snoozed
@@ -65,6 +69,13 @@ struct PersistedSettings: Codable, Equatable {
     var enableReadyNotification: Bool = true
     var enableTestsFailingNotification: Bool = true
     var enableAutoRebaseFailureNotification: Bool = true
+    /// Auto-merge failure has its own toggle so it can be muted independently of
+    /// auto-rebase failure. Default on — failures here are usually actionable.
+    var enableAutoMergeFailureNotification: Bool = true
+    /// Opt-in success notification when auto-merge completes. Default off; the
+    /// activity log already records every merge and the point of "auto" is to
+    /// disappear. Useful for users who specifically want closure.
+    var enableAutoMergeCompletedNotification: Bool = false
     var defaultRepoFilter: String? = nil
     var sortOrder: PRSortOption = .updated
     /// Root directory for worktrees this app creates. Default expands to
@@ -72,6 +83,29 @@ struct PersistedSettings: Codable, Equatable {
     var worktreeRoot: String = "~/worktrees/gitpilot"
     /// Preferred editor command. "auto" detects Cursor first, then VSCode, then falls back.
     var editorCommand: String = "auto"  // "auto" | "code" | "cursor" | "subl" | etc.
+
+    init() {}
+
+    /// Custom decoder that tolerates missing keys by falling back to property
+    /// defaults. Without this, adding a new field would force every existing
+    /// state.json to fail decoding (Swift's synthesized `init(from:)` does not
+    /// consult property initializers), and the `PersistenceStore` catch block
+    /// would then reset the user's pinned/snooze/etc. state.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init()
+        if let v = try c.decodeIfPresent(Double.self, forKey: .pollIntervalSeconds) { pollIntervalSeconds = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableRebaseNotification) { enableRebaseNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableReadyNotification) { enableReadyNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableTestsFailingNotification) { enableTestsFailingNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableAutoRebaseFailureNotification) { enableAutoRebaseFailureNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableAutoMergeFailureNotification) { enableAutoMergeFailureNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableAutoMergeCompletedNotification) { enableAutoMergeCompletedNotification = v }
+        defaultRepoFilter = try c.decodeIfPresent(String.self, forKey: .defaultRepoFilter)
+        if let v = try c.decodeIfPresent(PRSortOption.self, forKey: .sortOrder) { sortOrder = v }
+        if let v = try c.decodeIfPresent(String.self, forKey: .worktreeRoot) { worktreeRoot = v }
+        if let v = try c.decodeIfPresent(String.self, forKey: .editorCommand) { editorCommand = v }
+    }
 }
 
 /// Single source of truth for everything we keep across launches:

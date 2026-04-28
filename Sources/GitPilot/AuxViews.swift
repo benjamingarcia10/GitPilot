@@ -144,6 +144,7 @@ struct PinnedBanner: View {
 /// the first decision, so we offer a `gh auth login` shortcut and a retry button.
 struct AuthBanner: View {
     let reason: String
+    let isChecking: Bool
     let onRetry: () -> Void
 
     var body: some View {
@@ -169,9 +170,10 @@ struct AuthBanner: View {
             }
             HStack {
                 Spacer()
-                Button("I've signed in — retry", action: onRetry)
+                Button(isChecking ? "Checking…" : "I've signed in — retry", action: onRetry)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .disabled(isChecking)
             }
             .padding(.top, 4)
         }
@@ -288,6 +290,17 @@ struct SettingsSection: View {
             set: { v in state.updateSettings { $0.enableAutoRebaseFailureNotification = v } }
         ))
         .font(.caption)
+        Toggle("Notify on auto-merge failure", isOn: Binding(
+            get: { state.persistedState.settings.enableAutoMergeFailureNotification },
+            set: { v in state.updateSettings { $0.enableAutoMergeFailureNotification = v } }
+        ))
+        .font(.caption)
+        Toggle("Notify when auto-merge completes", isOn: Binding(
+            get: { state.persistedState.settings.enableAutoMergeCompletedNotification },
+            set: { v in state.updateSettings { $0.enableAutoMergeCompletedNotification = v } }
+        ))
+        .font(.caption)
+        .help("Off by default — activity log already records every merge.")
     }
 
     /// Auto-merge method per repo. Default = auto-pick using SQUASH > MERGE > REBASE
@@ -376,11 +389,12 @@ struct SettingsSection: View {
         HStack {
             Text("Verify notification setup").font(.caption).foregroundStyle(.secondary)
             Spacer()
-            Button("Send test notification") {
+            Button(state.isFiringTestNotifications ? "Sending…" : "Send test notification") {
                 Task { await state.fireTestNotifications() }
             }
             .buttonStyle(.borderless)
             .font(.caption)
+            .disabled(state.isFiringTestNotifications)
         }
     }
 }

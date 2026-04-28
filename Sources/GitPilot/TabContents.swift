@@ -98,7 +98,16 @@ private struct ActivityRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if let detail = event.detail {
-                    Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    // Allow a few lines for readability; full text on hover; selectable
+                    // so the user can copy a long error to paste into a search or chat.
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .help(detail)
                 }
             }
         }
@@ -115,22 +124,26 @@ private struct ActivityRow: View {
 
     private var label: String {
         switch event.kind {
-        case .becameBehind:        return "behind base"
-        case .becameReady:         return "ready to merge"
-        case .becameTestsFailing:  return "tests failing"
-        case .becameConflicts:     return "merge conflict"
-        case .rebased:             return "rebased"
-        case .autoRebased:         return "auto-rebased"
-        case .autoRebaseFailed:    return "auto-rebase failed"
-        case .merged:              return "merged"
-        case .pinned:              return "pinned"
-        case .unpinned:            return "unpinned"
-        case .snoozed:             return "snoozed"
-        case .unsnoozed:           return "snooze cancelled"
-        case .autoMergeEnabled:    return "auto-merge enabled"
-        case .autoMergeDisabled:   return "auto-merge disabled"
-        case .appeared:            return "appeared"
-        case .disappeared:         return "left list"
+        case .becameBehind:         return "behind base"
+        case .becameReady:          return "ready to merge"
+        case .becameTestsFailing:   return "tests failing"
+        case .becameConflicts:      return "merge conflict"
+        case .rebased:              return "rebased"
+        case .rebaseFailed:         return "rebase failed"
+        case .autoRebased:          return "auto-rebased"
+        case .autoRebaseFailed:     return "auto-rebase failed"
+        case .merged:               return "merged"
+        case .autoMergeFailed:      return "auto-merge failed"
+        case .worktreeCreateFailed: return "worktree create failed"
+        case .worktreeRemoveFailed: return "worktree remove failed"
+        case .pinned:               return "pinned"
+        case .unpinned:             return "unpinned"
+        case .snoozed:              return "snoozed"
+        case .unsnoozed:            return "snooze cancelled"
+        case .autoMergeEnabled:     return "auto-merge enabled"
+        case .autoMergeDisabled:    return "auto-merge disabled"
+        case .appeared:             return "appeared"
+        case .disappeared:          return "left list"
         }
     }
 
@@ -138,12 +151,16 @@ private struct ActivityRow: View {
         switch event.kind {
         case .becameBehind, .rebased, .autoRebased: return "arrow.triangle.2.circlepath"
         case .becameReady:                          return "checkmark.circle.fill"
-        case .becameTestsFailing, .autoRebaseFailed: return "xmark.octagon.fill"
+        case .becameTestsFailing,
+             .rebaseFailed, .autoRebaseFailed,
+             .autoMergeFailed:                      return "xmark.octagon.fill"
         case .becameConflicts:                      return "exclamationmark.triangle.fill"
         case .merged:                               return "arrow.triangle.merge"
         case .pinned, .unpinned:                    return "pin.fill"
         case .snoozed, .unsnoozed:                  return "moon.zzz.fill"
         case .autoMergeEnabled, .autoMergeDisabled: return "bolt.fill"
+        case .worktreeCreateFailed,
+             .worktreeRemoveFailed:                 return "folder.badge.questionmark"
         case .appeared:                             return "plus.circle"
         case .disappeared:                          return "minus.circle"
         }
@@ -152,7 +169,9 @@ private struct ActivityRow: View {
     private var color: Color {
         switch event.kind {
         case .becameReady, .merged, .rebased, .autoRebased: return .green
-        case .becameTestsFailing, .autoRebaseFailed, .becameConflicts: return .red
+        case .becameTestsFailing, .becameConflicts,
+             .rebaseFailed, .autoRebaseFailed, .autoMergeFailed,
+             .worktreeCreateFailed, .worktreeRemoveFailed: return .red
         case .becameBehind: return .orange
         case .pinned: return Color.accentColor
         case .snoozed: return .purple
@@ -250,6 +269,7 @@ private struct WorktreeRow: View {
             Button("Open") { state.openWorktreeInEditor(prId: prId) }
                 .buttonStyle(.hover)
                 .font(.caption)
+            let removing = state.worktreeRemoveInFlight.contains(prId)
             Button(role: .destructive) {
                 // Dirty worktrees require explicit confirmation to avoid losing
                 // uncommitted changes. Clean ones remove immediately.
@@ -262,10 +282,11 @@ private struct WorktreeRow: View {
                     }
                 }
             } label: {
-                Text("Remove")
+                Text(removing ? "Removing…" : "Remove")
             }
             .buttonStyle(.hover)
             .font(.caption)
+            .disabled(removing)
             .confirmationDialog(
                 "Worktree has uncommitted changes. Remove anyway?",
                 isPresented: $confirmingDirtyRemove

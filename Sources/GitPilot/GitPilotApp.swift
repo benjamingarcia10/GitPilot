@@ -140,7 +140,11 @@ private struct MenuContent: View {
             case .unknown:
                 Text("Checking GitHub auth…").foregroundStyle(.secondary)
             case .needsReauth(let reason):
-                AuthBanner(reason: reason, onRetry: { Task { await state.checkAuth() } })
+                AuthBanner(
+                    reason: reason,
+                    isChecking: state.isCheckingAuth,
+                    onRetry: { Task { await state.checkAuth() } }
+                )
             case .authenticated:
                 tabBody
             }

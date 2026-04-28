@@ -7,6 +7,8 @@ enum NotificationCategory {
     static let readyToMerge = "GP_READY_TO_MERGE"
     static let testsFailing = "GP_TESTS_FAILING"
     static let autoRebaseFailed = "GP_AUTO_REBASE_FAILED"
+    static let autoMergeFailed = "GP_AUTO_MERGE_FAILED"
+    static let autoMergeCompleted = "GP_AUTO_MERGE_COMPLETED"
 }
 
 enum NotificationAction {
@@ -100,7 +102,24 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
             options: []
         )
 
-        center.setNotificationCategories([needsUpdate, readyToMerge, testsFailing, autoRebaseFailed])
+        let autoMergeFailed = UNNotificationCategory(
+            identifier: NotificationCategory.autoMergeFailed,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        let autoMergeCompleted = UNNotificationCategory(
+            identifier: NotificationCategory.autoMergeCompleted,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([
+            needsUpdate, readyToMerge, testsFailing,
+            autoRebaseFailed, autoMergeFailed, autoMergeCompleted,
+        ])
     }
 
     func notifyNeedsUpdate(pr: PullRequest) async {
@@ -144,6 +163,28 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
             subtitle: "PR #\(pr.number)",
             body: "\(pr.title)\n\(reason)",
             category: NotificationCategory.autoRebaseFailed
+        )
+    }
+
+    func notifyAutoMergeFailed(pr: PullRequest, reason: String) async {
+        await notify(
+            pr: pr,
+            idPrefix: "auto-merge-failed",
+            title: "Auto-merge failed",
+            subtitle: "PR #\(pr.number)",
+            body: "\(pr.title)\n\(reason)",
+            category: NotificationCategory.autoMergeFailed
+        )
+    }
+
+    func notifyAutoMergeCompleted(pr: PullRequest, method: String) async {
+        await notify(
+            pr: pr,
+            idPrefix: "auto-merge-completed",
+            title: "Auto-merge complete",
+            subtitle: "PR #\(pr.number)",
+            body: "\(pr.title)\nMerged via \(method.lowercased())",
+            category: NotificationCategory.autoMergeCompleted
         )
     }
 

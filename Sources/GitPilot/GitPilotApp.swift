@@ -627,7 +627,10 @@ private struct PRRow: View {
         components.day = (components.day ?? 0) + 1
         components.hour = 9
         components.minute = 0
-        let target = cal.date(from: components) ?? now.addingTimeInterval(8 * 3600)
+        // Conservative fallback: 1 hour, not 8. If Calendar can't construct
+        // tomorrow-at-9-AM (extremely unlikely), the user will hit the snooze
+        // sooner and notice rather than be silently ignored for 8 hours.
+        let target = cal.date(from: components) ?? now.addingTimeInterval(3600)
         return max(60, target.timeIntervalSince(now))
     }
 
@@ -1206,7 +1209,7 @@ private struct PinnedBanner: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "pin.fill").foregroundStyle(Color.accentColor).font(.caption)
-                Text("\(state.persistedState.pinned.count) pinned · only pinned PRs notify")
+                Text(headerText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -1227,6 +1230,20 @@ private struct PinnedBanner: View {
         .padding(.vertical, 5)
         .background(Color.accentColor.opacity(0.10))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Header text mentions both pinned count and any active snoozes so users
+    /// can see why notifications might appear silent.
+    private var headerText: String {
+        let pinned = state.persistedState.pinned.count
+        let snoozedActive = state.persistedState.snoozedUntil
+            .filter { $0.value > Date() }
+            .count
+        var parts: [String] = ["\(pinned) pinned · only pinned PRs notify"]
+        if snoozedActive > 0 {
+            parts.append("\(snoozedActive) snoozed")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

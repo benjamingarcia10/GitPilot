@@ -11,10 +11,17 @@ final class PRMonitor: ObservableObject {
     /// True while a refresh is in flight (covers both phases). Drives the spinner
     /// in the menu and disables the refresh button to prevent spam-clicking.
     @Published private(set) var isRefreshing: Bool = false
+    /// Count of per-PR enrichment failures from the last refresh. Used to tooltip
+    /// the refresh button so the user knows why some rows stay in "loading…".
+    @Published private(set) var enrichmentFailureCount: Int = 0
 
     private let client: GitHubClient
     private(set) var pollInterval: TimeInterval
     private var task: Task<Void, Never>?
+    /// Explicit running flag. Task.isCancelled isn't enough on its own —
+    /// a finished-and-returned task is "not cancelled" but also not running,
+    /// so checking that alone would let `start()` no-op when it shouldn't.
+    private var isRunning = false
 
     /// Called immediately before each refresh starts. AppState uses this to clear
     /// expired snoozes so the upcoming pass treats those PRs as fresh.
@@ -41,8 +48,10 @@ final class PRMonitor: ObservableObject {
 
     func start() {
         // No-op if already running — guards menu-open re-bootstrap from kicking off duplicate fetches.
-        if let existing = task, !existing.isCancelled { return }
+        if isRunning { return }
+        isRunning = true
         task = Task { [weak self] in
+            defer { Task { @MainActor in self?.isRunning = false } }
             guard let self else { return }
             while !Task.isCancelled {
                 await self.refresh()
@@ -54,6 +63,7 @@ final class PRMonitor: ObservableObject {
     func stop() {
         task?.cancel()
         task = nil
+        isRunning = false
     }
 
     /// Two-phase refresh:
@@ -90,22 +100,29 @@ final class PRMonitor: ObservableObject {
             // Per-task cancellation checks ensure a stop()-then-restart cycle doesn't
             // publish stale enrichment after the new refresh has started.
             let enrichStart = Date()
-            await withTaskGroup(of: Void.self) { group in
+            enrichmentFailureCount = 0
+            await withTaskGroup(of: Bool.self) { group in
                 for pr in lightPRs {
                     group.addTask { [weak self] in
-                        guard let self, !Task.isCancelled else { return }
+                        guard let self, !Task.isCancelled else { return false }
                         do {
                             let enrichment = try await self.client.enrichPR(nodeId: pr.nodeId)
-                            guard !Task.isCancelled else { return }
+                            guard !Task.isCancelled else { return false }
                             await self.applyEnrichment(prId: pr.id, enrichment: enrichment)
+                            return true
                         } catch let err as GitHubClientError where err.isAuthError {
                             await self.handleAuthError(err.localizedDescription)
+                            return false
                         } catch {
-                            // Non-auth enrichment failures: leave the row in loading state.
-                            // A future refresh will retry.
+                            // Non-auth enrichment failures: leave the row in loading state
+                            // and increment the failure counter so the UI can hint why.
+                            return false
                         }
                     }
                 }
+                var failed = 0
+                for await ok in group where !ok { failed += 1 }
+                enrichmentFailureCount = failed
             }
             Log.debug("phase2 enrichment complete", elapsed: enrichStart)
             Log.debug("refresh total", elapsed: refreshStart)

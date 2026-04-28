@@ -29,17 +29,11 @@ enum WorktreeManager {
     }
 
     /// Locate the local checkout for a given owner/repo. We probe a few common roots.
-    /// Returns nil if we can't find it — caller surfaces an error to the user.
+    /// Returns nil if we can't find it — caller surfaces an error to the user
+    /// (with the probed paths in the message so the user knows where to look).
     static func locateLocalRepo(owner: String, name: String) -> URL? {
         let fm = FileManager.default
-        let candidates = [
-            "~/work/\(name)",
-            "~/work/\(owner)/\(name)",
-            "~/projects/\(name)",
-            "~/code/\(name)",
-            "~/src/\(name)",
-        ]
-        for candidate in candidates {
+        for candidate in repoSearchCandidates(owner: owner, name: name) {
             let path = (candidate as NSString).expandingTildeInPath
             let gitDir = URL(fileURLWithPath: path).appendingPathComponent(".git")
             if fm.fileExists(atPath: gitDir.path) {
@@ -47,6 +41,16 @@ enum WorktreeManager {
             }
         }
         return nil
+    }
+
+    /// Paths we probe when looking for a local checkout. Exposed so callers can
+    /// include the list in error messages.
+    static func repoSearchCandidates(owner: String, name: String) -> [String] {
+        ["~/work/\(name)",
+         "~/work/\(owner)/\(name)",
+         "~/projects/\(name)",
+         "~/code/\(name)",
+         "~/src/\(name)"]
     }
 
     /// Create a worktree at the resolved path. Fetches first so the branch ref

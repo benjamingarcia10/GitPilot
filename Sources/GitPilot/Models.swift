@@ -118,8 +118,11 @@ struct PullRequest: Codable, Identifiable, Equatable {
     var isLoading: Bool { mergeStateStatus == nil }
 
     /// Whether the PR is in the narrow window where you can merge: green, approved, up to date.
+    /// `hasHooks` is treated the same as `clean` — GitHub sets it when the head
+    /// commit has commit-message hooks but is otherwise mergeable.
     var isReadyToMerge: Bool {
-        mergeStateStatus == .clean && reviewDecision == "APPROVED" && !isDraft
+        let mergeable = mergeStateStatus == .clean || mergeStateStatus == .hasHooks
+        return mergeable && reviewDecision == "APPROVED" && !isDraft
     }
 
     /// Strictly out-of-date with base. A rebase will help.

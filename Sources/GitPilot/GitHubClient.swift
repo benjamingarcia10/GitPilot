@@ -660,7 +660,30 @@ actor GitHubClient {
 
     // MARK: - GraphQL helper
 
-    private func graphQL(payload: [String: Any]) async throws -> Data {
+    /// Single-call helper: runs a GraphQL operation and decodes the `data` payload
+    /// into `T`. Surfaces GraphQL `errors` (returned as 200-with-errors-array) as
+    /// a real error instead of letting them silently become "decode failed".
+    /// Use this for every query and mutation.
+    private func graphQL<T: Decodable>(_ query: String,
+                                        variables: [String: Any] = [:],
+                                        _ type: T.Type) async throws -> T {
+        var payload: [String: Any] = ["query": query]
+        if !variables.isEmpty { payload["variables"] = variables }
+        let data = try await graphQLRaw(payload: payload)
+        do {
+            return try JSONDecoder().decode(GraphQLEnvelope<T>.self, from: data).data
+        } catch let err as GitHubClientError {
+            throw err
+        } catch {
+            throw GitHubClientError.decodingFailed(String(describing: error))
+        }
+    }
+
+    /// Raw GraphQL POST. Returns the response body. Used by the typed helper above
+    /// and by mutations that don't need to decode anything.
+    /// Surfaces GraphQL `errors` arrays as proper errors so callers don't see a
+    /// generic "decode failed" when GitHub actually told us something useful.
+    private func graphQLRaw(payload: [String: Any]) async throws -> Data {
         var req = URLRequest(url: URL(string: "https://api.github.com/graphql")!)
         req.httpMethod = "POST"
         req.setValue("Bearer \(try token())", forHTTPHeaderField: "Authorization")
@@ -678,6 +701,44 @@ actor GitHubClient {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw GitHubClientError.requestFailed(http.statusCode, body)
         }
+        // Peek for GraphQL-level errors. GitHub returns 200 for these with an
+        // `errors` array, which would otherwise fail downstream decoding with a
+        // confusing missing-keys message.
+        struct ErrorPeek: Decodable {
+            struct Err: Decodable { let message: String }
+            let errors: [Err]?
+        }
+        if let peek = try? JSONDecoder().decode(ErrorPeek.self, from: data),
+           let errors = peek.errors, !errors.isEmpty {
+            throw GitHubClientError.requestFailed(200, errors.map(\.message).joined(separator: "; "))
+        }
         return data
+    }
+}
+
+/// Wraps every GraphQL response. A successful response has `data` populated;
+/// an unsuccessful one has `errors` (returned with HTTP 200, which is why we
+/// can't rely on status codes alone). Decoding throws if neither is present.
+private struct GraphQLEnvelope<T: Decodable>: Decodable {
+    struct GraphQLError: Decodable { let message: String }
+    let data: T
+
+    enum CodingKeys: String, CodingKey { case data, errors }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let errors = try container.decodeIfPresent([GraphQLError].self, forKey: .errors),
+           !errors.isEmpty {
+            throw GitHubClientError.requestFailed(200, errors.map(\.message).joined(separator: "; "))
+        }
+        self.data = try container.decode(T.self, forKey: .data)
+    }
+}
+
+extension GitHubClient {
+    /// Internal convenience for legacy callers that don't decode into a Decodable
+    /// type yet. Returns the raw body. Will be removed once mutations are migrated.
+    fileprivate func graphQL(payload: [String: Any]) async throws -> Data {
+        try await graphQLRaw(payload: payload)
     }
 }

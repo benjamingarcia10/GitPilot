@@ -8,7 +8,9 @@ import AppKit
 final class AppState: ObservableObject {
     let client: GitHubClient
     let monitor: PRMonitor
-    private(set) var notifications: NotificationService!
+    /// Plain `let` — initialized in init with a placeholder closure, then we
+    /// reassign its onResponse handler after super-init when self is available.
+    let notifications: NotificationService
 
     /// Drives the auth banner in the menu UI.
     @Published var authStatus: AuthStatus = .unknown
@@ -77,10 +79,13 @@ final class AppState: ObservableObject {
         self.monitor = PRMonitor(client: client, pollInterval: persisted.settings.pollIntervalSeconds)
         self.persistedState = persisted
         self.repoFilter = persisted.settings.defaultRepoFilter
-        self.notifications = NotificationService { [weak self] response in
+        self.notifications = NotificationService()
+
+        // Wire callbacks now that all stored properties are initialized and
+        // capturing `self` is safe.
+        self.notifications.onResponse = { [weak self] response in
             Task { @MainActor in await self?.handle(response: response) }
         }
-        // Wire monitor callbacks. AppState owns all the policy logic now.
         self.monitor.onAuthError = { [weak self] reason in
             Task { @MainActor in self?.applyAuthFailure(reason) }
         }
@@ -473,9 +478,10 @@ final class AppState: ObservableObject {
         defer { worktreeInFlight.remove(pr.id) }
 
         guard let repoPath = WorktreeManager.locateLocalRepo(owner: pr.repoOwner, name: pr.repoName) else {
+            let probed = WorktreeManager.repoSearchCandidates(owner: pr.repoOwner, name: pr.repoName)
             await notifications.notifyAutoRebaseFailed(
                 pr: pr,
-                reason: "No local checkout found for \(pr.repoOwner)/\(pr.repoName)."
+                reason: "No local checkout for \(pr.repoOwner)/\(pr.repoName). Probed: \(probed.joined(separator: ", "))"
             )
             return
         }
@@ -579,13 +585,20 @@ final class AppState: ObservableObject {
     }
 
     /// All repos we've seen PRs for, with their allowed methods. For settings UI.
-    var seenRepos: [(key: String, allowed: Set<String>)] {
+    /// Backed by a @Published mirror so SwiftUI re-renders cleanly when the set
+    /// changes (the previous computed-property version recomputed on every body
+    /// invocation and didn't trigger when monitor.prs changed because the publisher
+    /// nesting wasn't observed by SettingsSection).
+    @Published private(set) var seenRepos: [(key: String, allowed: Set<String>)] = []
+
+    private func recomputeSeenRepos() {
         var byKey: [String: Set<String>] = [:]
         for pr in monitor.prs {
             let k = "\(pr.repoOwner)/\(pr.repoName)"
             byKey[k] = pr.allowedMergeMethods
         }
-        return byKey.map { (key: $0.key, allowed: $0.value) }.sorted { $0.key < $1.key }
+        seenRepos = byKey.map { (key: $0.key, allowed: $0.value) }
+            .sorted { $0.key < $1.key }
     }
 
     func updateSettings(_ block: (inout PersistedSettings) -> Void) {
@@ -639,6 +652,8 @@ final class AppState: ObservableObject {
     /// over a long session.
     private func cleanDedupeForClosedPRs(liveIds: Set<String>) {
         recordListChurn(liveIds: liveIds)
+        // Refresh the cached repo list so settings sees the new shape immediately.
+        recomputeSeenRepos()
         let staleKeys = persistedState.notifiedNeedsUpdate.union(
                           persistedState.notifiedReadyToMerge).union(
                           persistedState.notifiedBlockedByTests)
@@ -765,6 +780,12 @@ final class AppState: ObservableObject {
 
     // MARK: - Test notifications
 
+    /// Fires every notification kind against a synthetic PR. Used by the Settings
+    /// "Send test notification" button to verify the notification pipeline.
+    /// The synthetic ids never match anything in monitor.prs or reviewingPRs, so
+    /// lookupPR returns nil for all action paths and no real PR is affected if
+    /// the user clicks an action button. If you ever add a network-lookup fallback,
+    /// gate it on a non-test id prefix so we don't 404 on a synthetic.
     func fireTestNotifications() async {
         let pr = PullRequest(
             nodeId: "__gitpilot_test_node__",

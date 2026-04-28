@@ -48,8 +48,9 @@ rebuild_and_run() {
   kill_app
   if "$ROOT/scripts/build-app.sh" 2>&1 | prefix "[build]"; then
     echo "[dev] $(date +%H:%M:%S) launching"
-    # Run the binary directly so we can tee its stderr.
-    "$APP_BIN" 2>&1 | prefix "[app]" &
+    # Run the binary directly so we can tee its stderr. GITPILOT_DEBUG=1 enables
+    # the verbose Log.debug timings during development.
+    GITPILOT_DEBUG=1 "$APP_BIN" 2>&1 | prefix "[app]" &
     APP_PID=$!
   else
     echo "[dev] build failed — leaving previous app down. Fix and save again."

@@ -25,14 +25,16 @@ enum NotificationResponse {
 /// Wraps UNUserNotificationCenter. Categories with action buttons are registered once at launch.
 final class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     private let center = UNUserNotificationCenter.current()
-    private let onResponse: (NotificationResponse) -> Void
+
+    /// Set by AppState after construction so the closure can capture `self`
+    /// without requiring the AppState property to be implicitly-unwrapped.
+    var onResponse: (NotificationResponse) -> Void = { _ in }
 
     /// Mirrors UNAuthorizationStatus so the UI can show a banner when notifications
     /// are denied and silently dropping. Updated after request and on demand.
     @Published var authorizationStatus: UNAuthorizationStatus = .notDetermined
 
-    init(onResponse: @escaping (NotificationResponse) -> Void) {
-        self.onResponse = onResponse
+    override init() {
         super.init()
         center.delegate = self
     }
@@ -102,52 +104,69 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
     }
 
     func notifyNeedsUpdate(pr: PullRequest) async {
-        let content = UNMutableNotificationContent()
-        content.title = "Rebase PR?"
-        content.subtitle = "PR #\(pr.number) is behind \(pr.baseRefName)"
-        content.body = pr.title
-        content.categoryIdentifier = NotificationCategory.needsUpdate
-        content.sound = .default
-        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
-        await schedule(id: "needs-update-\(pr.id)", content: content)
+        await notify(
+            pr: pr,
+            idPrefix: "needs-update",
+            title: "Rebase PR?",
+            subtitle: "PR #\(pr.number) is behind \(pr.baseRefName)",
+            body: pr.title,
+            category: NotificationCategory.needsUpdate
+        )
     }
 
     func notifyReadyToMerge(pr: PullRequest) async {
-        let content = UNMutableNotificationContent()
-        content.title = "Ready to merge"
-        content.subtitle = "PR #\(pr.number)"
-        content.body = pr.title
-        content.categoryIdentifier = NotificationCategory.readyToMerge
-        content.sound = .default
-        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
-        await schedule(id: "ready-\(pr.id)", content: content)
+        await notify(
+            pr: pr,
+            idPrefix: "ready",
+            title: "Ready to merge",
+            subtitle: "PR #\(pr.number)",
+            body: pr.title,
+            category: NotificationCategory.readyToMerge
+        )
     }
 
     func notifyTestsFailing(pr: PullRequest) async {
-        let content = UNMutableNotificationContent()
-        content.title = "CI failing"
-        content.subtitle = "PR #\(pr.number)"
-        content.body = pr.title
-        content.categoryIdentifier = NotificationCategory.testsFailing
-        content.sound = .default
-        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
-        await schedule(id: "tests-\(pr.id)", content: content)
+        await notify(
+            pr: pr,
+            idPrefix: "tests",
+            title: "CI failing",
+            subtitle: "PR #\(pr.number)",
+            body: pr.title,
+            category: NotificationCategory.testsFailing
+        )
     }
 
     func notifyAutoRebaseFailed(pr: PullRequest, reason: String) async {
-        let content = UNMutableNotificationContent()
-        content.title = "Auto-rebase failed"
-        content.subtitle = "PR #\(pr.number)"
-        content.body = "\(pr.title)\n\(reason)"
-        content.categoryIdentifier = NotificationCategory.autoRebaseFailed
-        content.sound = .default
-        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
-        await schedule(id: "auto-rebase-failed-\(pr.id)", content: content)
+        await notify(
+            pr: pr,
+            idPrefix: "auto-rebase-failed",
+            title: "Auto-rebase failed",
+            subtitle: "PR #\(pr.number)",
+            body: "\(pr.title)\n\(reason)",
+            category: NotificationCategory.autoRebaseFailed
+        )
     }
 
-    private func schedule(id: String, content: UNMutableNotificationContent) async {
-        let req = UNNotificationRequest(identifier: id, content: content, trigger: nil)
-        do { try await center.add(req) } catch { print("Notification add failed: \(error)") }
+    /// Single scheduling entry — every notify* method routes through this so
+    /// the boilerplate (content, category, sound, userInfo, request id) lives
+    /// in one place.
+    private func notify(
+        pr: PullRequest,
+        idPrefix: String,
+        title: String,
+        subtitle: String,
+        body: String,
+        category: String
+    ) async {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = subtitle
+        content.body = body
+        content.categoryIdentifier = category
+        content.sound = .default
+        content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
+        let req = UNNotificationRequest(identifier: "\(idPrefix)-\(pr.id)", content: content, trigger: nil)
+        do { try await center.add(req) } catch { Log.debug("Notification add failed: \(error)") }
     }
 
     // MARK: - UNUserNotificationCenterDelegate

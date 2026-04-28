@@ -209,23 +209,21 @@ struct WorktreesTabContent: View {
         .task { await refreshAllStatuses() }
     }
 
-    /// Status checks shell out to git (not free), so run them off the main actor.
+    /// Status checks shell out to git (not free). They're now async via a
+    /// continuation in WorktreeManager so they don't pin a cooperative-pool thread.
     private func refreshAllStatuses() async {
         let entries = state.persistedState.worktrees
-        let snapshot = await Task.detached { () -> [String: WorktreeStatus] in
-            var out: [String: WorktreeStatus] = [:]
-            for (prId, path) in entries {
-                out[prId] = WorktreeManager.status(at: URL(fileURLWithPath: path))
-            }
-            return out
-        }.value
+        var snapshot: [String: WorktreeStatus] = [:]
+        for (prId, path) in entries {
+            snapshot[prId] = await WorktreeManager.status(at: URL(fileURLWithPath: path))
+        }
         statusByPRId = snapshot
     }
 
     private func refreshStatus(prId: String, path: String) {
-        Task.detached {
-            let status = WorktreeManager.status(at: URL(fileURLWithPath: path))
-            await MainActor.run { self.statusByPRId[prId] = status }
+        Task {
+            let status = await WorktreeManager.status(at: URL(fileURLWithPath: path))
+            statusByPRId[prId] = status
         }
     }
 }

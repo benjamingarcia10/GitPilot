@@ -427,32 +427,37 @@ final class AppState: ObservableObject {
             // Carry forward enrichment from the previous snapshot so rows don't
             // flash to "loading" while phase-2 fetches in the background.
             let previousById = Dictionary(uniqueKeysWithValues: reviewingPRs.map { ($0.id, $0) })
-            var enriched = prs.map { fresh -> PullRequest in
+            reviewingPRs = prs.map { fresh -> PullRequest in
                 guard let prev = previousById[fresh.id] else { return fresh }
                 var merged = fresh
                 merged.carryForwardEnrichment(from: prev)
                 return merged
             }
-            // Show the carried-forward list immediately, then fill in fresh data per-PR.
-            reviewingPRs = enriched
-            await withTaskGroup(of: (Int, PREnrichment?).self) { group in
-                for (idx, pr) in prs.enumerated() {
+            // Apply each enrichment per-PR as it arrives — symmetry with My PRs,
+            // so rows light up incrementally on the Reviewing tab too. The lookup
+            // is by `prId` (not array index) so concurrent edits to reviewingPRs
+            // don't corrupt the apply.
+            await withTaskGroup(of: (String, PREnrichment?).self) { group in
+                for pr in prs {
+                    let prId = pr.id
+                    let nodeId = pr.nodeId
                     group.addTask { [client = self.client] in
-                        if Task.isCancelled { return (idx, nil) }
+                        if Task.isCancelled { return (prId, nil) }
                         do {
-                            let e = try await client.enrichPR(nodeId: pr.nodeId)
-                            return (idx, e)
+                            let e = try await client.enrichPR(nodeId: nodeId)
+                            return (prId, e)
                         } catch {
-                            return (idx, nil)
+                            return (prId, nil)
                         }
                     }
                 }
-                for await (idx, e) in group {
+                for await (prId, e) in group {
                     guard let e, !Task.isCancelled else { continue }
-                    enriched[idx].apply(e)
+                    if let idx = reviewingPRs.firstIndex(where: { $0.id == prId }) {
+                        reviewingPRs[idx].apply(e)
+                    }
                 }
             }
-            reviewingPRs = enriched
         } catch is CancellationError {
             // Outer task was cancelled — happens when SwiftUI views re-render or
             // the user switches tabs mid-fetch. Not a real error; stay silent.
@@ -492,12 +497,12 @@ final class AppState: ObservableObject {
         let branch = pr.headRefName
         let editor = persistedState.settings.editorCommand
         do {
-            try await Task.detached {
-                _ = try WorktreeManager.create(repoPath: repoPath, worktreePath: worktreePath, branch: branch)
-            }.value
+            // create / remove are async with continuation-based git wrapping, so
+            // they suspend instead of blocking a cooperative-pool thread on
+            // `git fetch`. No Task.detached needed.
+            _ = try await WorktreeManager.create(repoPath: repoPath, worktreePath: worktreePath, branch: branch)
             mutate { $0.worktrees[pr.id] = worktreePath.path }
-            // Editor open is also subprocess work; detach it.
-            Task.detached { WorktreeManager.openInEditor(worktreePath, command: editor) }
+            WorktreeManager.openInEditor(worktreePath, command: editor)
         } catch {
             Log.debug("createWorktree \(pr.id) failed: \(error.localizedDescription)")
             await notifications.notifyAutoRebaseFailed(pr: pr, reason: error.localizedDescription)
@@ -505,24 +510,22 @@ final class AppState: ObservableObject {
     }
 
     /// Open an already-created worktree in the configured editor.
+    /// `openInEditor` only calls `Process.run()` (no waitUntilExit) so it doesn't
+    /// block; the editor stays open as a child process.
     func openWorktreeInEditor(prId: String) {
         guard let pathString = persistedState.worktrees[prId] else { return }
         let url = URL(fileURLWithPath: pathString)
-        let editor = persistedState.settings.editorCommand
-        Task.detached { WorktreeManager.openInEditor(url, command: editor) }
+        WorktreeManager.openInEditor(url, command: persistedState.settings.editorCommand)
     }
 
     /// Remove a worktree. `force` only set after the user confirms past a dirty state.
-    /// Subprocess work runs detached so the menu doesn't freeze.
     func removeWorktree(prId: String, force: Bool = false) async {
         guard let pathString = persistedState.worktrees[prId] else { return }
         let worktreeURL = URL(fileURLWithPath: pathString)
 
         guard let pr = lookupPR(prId) else {
             // PR no longer in either list; remove the worktree by path only.
-            await Task.detached {
-                try? FileManager.default.removeItem(at: worktreeURL)
-            }.value
+            try? FileManager.default.removeItem(at: worktreeURL)
             mutate { $0.worktrees.removeValue(forKey: prId) }
             return
         }
@@ -531,9 +534,7 @@ final class AppState: ObservableObject {
             return
         }
         do {
-            try await Task.detached {
-                try WorktreeManager.remove(repoPath: repoPath, worktreePath: worktreeURL, force: force)
-            }.value
+            try await WorktreeManager.remove(repoPath: repoPath, worktreePath: worktreeURL, force: force)
             mutate { $0.worktrees.removeValue(forKey: prId) }
         } catch {
             Log.debug("removeWorktree \(prId) failed: \(error.localizedDescription)")
@@ -622,27 +623,33 @@ final class AppState: ObservableObject {
     /// Records an activity entry for each PR that just appeared or disappeared
     /// from the My PRs list. Skipped on the very first refresh to avoid flooding
     /// the timeline with "appeared" entries for every existing PR at app launch.
+    /// We track full PRs (not just ids) so the "disappeared" event still has the
+    /// title/number — by the time we detect the disappearance, the PR is no
+    /// longer in monitor.prs.
     private var firstListSettleSeen = false
-    private var lastSeenLiveIds: Set<String> = []
+    private var lastSeenPRsById: [String: PullRequest] = [:]
 
     private func recordListChurn(liveIds: Set<String>) {
+        let currentPRs = Dictionary(uniqueKeysWithValues: monitor.prs.map { ($0.id, $0) })
         defer {
             firstListSettleSeen = true
-            lastSeenLiveIds = liveIds
+            lastSeenPRsById = currentPRs
         }
         guard firstListSettleSeen else { return }
 
-        let appeared = liveIds.subtracting(lastSeenLiveIds)
-        for id in appeared {
-            if let pr = monitor.prs.first(where: { $0.id == id }) {
+        let appearedIds = liveIds.subtracting(lastSeenPRsById.keys)
+        for id in appearedIds {
+            if let pr = currentPRs[id] {
                 record(.appeared, pr: pr)
             }
         }
-        let disappeared = lastSeenLiveIds.subtracting(liveIds)
-        for id in disappeared {
-            // PR is gone from the list — we already lost its title. Use the last
-            // observed title from previous monitor.prs if we still have it.
-            recordActivity(prId: id, prNumber: 0, prTitle: id, kind: .disappeared)
+        let disappearedIds = Set(lastSeenPRsById.keys).subtracting(liveIds)
+        for id in disappearedIds {
+            // Use the last observed PR snapshot so the activity row has a real
+            // title and number (not a synthetic "#0" placeholder).
+            if let pr = lastSeenPRsById[id] {
+                record(.disappeared, pr: pr)
+            }
         }
     }
 

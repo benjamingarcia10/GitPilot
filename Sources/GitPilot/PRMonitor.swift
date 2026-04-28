@@ -99,31 +99,52 @@ final class PRMonitor: ObservableObject {
             // Enrich in parallel. Each task awaits one cheap GraphQL call and updates one row.
             // Per-task cancellation checks ensure a stop()-then-restart cycle doesn't
             // publish stale enrichment after the new refresh has started.
+            //
+            // Auth-error handling: child tasks return their result via the enum below
+            // so we can detect the *first* 401 and cancel the entire group, instead of
+            // letting every concurrent child hit the same 401 and fan out N
+            // applyAuthFailure calls. handleAuthError is invoked once after the group exits.
             let enrichStart = Date()
-            enrichmentFailureCount = 0
-            await withTaskGroup(of: Bool.self) { group in
+            enum ChildResult: Equatable { case ok, plainFailure, authFailure(String) }
+            var firstAuthError: String?
+            var failureCount = 0
+            await withTaskGroup(of: ChildResult.self) { group in
                 for pr in lightPRs {
                     group.addTask { [weak self] in
-                        guard let self, !Task.isCancelled else { return false }
+                        guard let self, !Task.isCancelled else { return .plainFailure }
                         do {
                             let enrichment = try await self.client.enrichPR(nodeId: pr.nodeId)
-                            guard !Task.isCancelled else { return false }
+                            guard !Task.isCancelled else { return .plainFailure }
                             await self.applyEnrichment(prId: pr.id, enrichment: enrichment)
-                            return true
+                            return .ok
                         } catch let err as GitHubClientError where err.isAuthError {
-                            await self.handleAuthError(err.localizedDescription)
-                            return false
+                            return .authFailure(err.localizedDescription)
                         } catch {
-                            // Non-auth enrichment failures: leave the row in loading state
-                            // and increment the failure counter so the UI can hint why.
-                            return false
+                            // Leave the row in loading state; the failure counter will reflect this.
+                            return .plainFailure
                         }
                     }
                 }
-                var failed = 0
-                for await ok in group where !ok { failed += 1 }
-                enrichmentFailureCount = failed
+                for await result in group {
+                    switch result {
+                    case .ok:
+                        continue
+                    case .plainFailure:
+                        failureCount += 1
+                    case .authFailure(let reason):
+                        if firstAuthError == nil {
+                            firstAuthError = reason
+                            // Cancel siblings so they don't all 401 with the same stale token.
+                            group.cancelAll()
+                        }
+                    }
+                }
             }
+            if let reason = firstAuthError {
+                handleAuthError(reason)
+                return
+            }
+            enrichmentFailureCount = failureCount
             Log.debug("phase2 enrichment complete", elapsed: enrichStart)
             Log.debug("refresh total", elapsed: refreshStart)
 

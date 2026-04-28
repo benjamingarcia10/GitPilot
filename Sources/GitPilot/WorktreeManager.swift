@@ -55,25 +55,27 @@ enum WorktreeManager {
 
     /// Create a worktree at the resolved path. Fetches first so the branch ref
     /// is up to date. Returns the absolute path on success, throws on failure.
+    /// `git fetch` can take 10s+; this runs async via a process termination
+    /// continuation so the cooperative thread pool isn't blocked on waitUntilExit.
     @discardableResult
-    static func create(repoPath: URL, worktreePath: URL, branch: String) throws -> URL {
+    static func create(repoPath: URL, worktreePath: URL, branch: String) async throws -> URL {
         let parent = worktreePath.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
         // git fetch origin <branch>
-        try runGit(repoPath: repoPath, args: ["fetch", "origin", branch])
+        _ = try await runGit(repoPath: repoPath, args: ["fetch", "origin", branch])
         // git worktree add <path> <branch>  — uses the existing local ref if present, else origin/<branch>
-        try runGit(repoPath: repoPath, args: ["worktree", "add", worktreePath.path, branch])
+        _ = try await runGit(repoPath: repoPath, args: ["worktree", "add", worktreePath.path, branch])
         return worktreePath
     }
 
     /// Returns the worktree's status: missing / clean / dirty.
-    static func status(at path: URL) -> WorktreeStatus {
+    static func status(at path: URL) async -> WorktreeStatus {
         if !FileManager.default.fileExists(atPath: path.path) {
             return .missing
         }
         do {
-            let output = try runGit(repoPath: path, args: ["status", "--porcelain"])
+            let output = try await runGit(repoPath: path, args: ["status", "--porcelain"])
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { return .clean }
             // Show first 3 lines as a quick summary in the UI.
@@ -84,24 +86,24 @@ enum WorktreeManager {
         }
     }
 
-    /// Remove a worktree. Refuses if status is .dirty. Caller should pre-check
-    /// or pass force = true (only when the user has explicitly confirmed).
-    static func remove(repoPath: URL, worktreePath: URL, force: Bool = false) throws {
+    /// Remove a worktree. Refuses if status is .dirty unless `force == true`.
+    static func remove(repoPath: URL, worktreePath: URL, force: Bool = false) async throws {
         if !force {
-            switch status(at: worktreePath) {
+            switch await status(at: worktreePath) {
             case .dirty(let summary):
                 throw WorktreeError.dirty(summary: summary)
             case .missing, .clean: break
             }
         }
-        // git -C <repo> worktree remove <path>
         // Falls back to manual rm if `git worktree remove` errors (e.g., missing ref).
         do {
-            try runGit(repoPath: repoPath, args: ["worktree", "remove", worktreePath.path] + (force ? ["--force"] : []))
+            _ = try await runGit(
+                repoPath: repoPath,
+                args: ["worktree", "remove", worktreePath.path] + (force ? ["--force"] : [])
+            )
         } catch {
-            // Fallback: remove the dir directly + prune
             try FileManager.default.removeItem(at: worktreePath)
-            _ = try? runGit(repoPath: repoPath, args: ["worktree", "prune"])
+            _ = try? await runGit(repoPath: repoPath, args: ["worktree", "prune"])
         }
     }
 
@@ -160,23 +162,34 @@ enum WorktreeManager {
         }
     }
 
+    /// Runs `git` and returns stdout. Uses a continuation + terminationHandler
+    /// so the calling task suspends instead of pinning a cooperative-pool thread
+    /// on `waitUntilExit` — important for `git fetch` which can take 10s+.
     @discardableResult
-    private static func runGit(repoPath: URL, args: [String]) throws -> String {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["git", "-C", repoPath.path] + args
-        let out = Pipe()
-        let err = Pipe()
-        proc.standardOutput = out
-        proc.standardError = err
-        try proc.run()
-        proc.waitUntilExit()
-        let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if proc.terminationStatus != 0 {
-            throw WorktreeError.git(args: args, stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    private static func runGit(repoPath: URL, args: [String]) async throws -> String {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            proc.arguments = ["git", "-C", repoPath.path] + args
+            let out = Pipe()
+            let err = Pipe()
+            proc.standardOutput = out
+            proc.standardError = err
+            proc.terminationHandler = { p in
+                let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                if p.terminationStatus == 0 {
+                    cont.resume(returning: stdout)
+                } else {
+                    cont.resume(throwing: WorktreeError.git(
+                        args: args,
+                        stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ))
+                }
+            }
+            do { try proc.run() }
+            catch { cont.resume(throwing: error) }
         }
-        return stdout
     }
 }
 

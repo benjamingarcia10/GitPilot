@@ -247,13 +247,16 @@ private struct MenuContent: View {
 
     @ViewBuilder
     private var reviewingTab: some View {
-        if state.reviewingPRs.isEmpty && !state.isLoadingReviewing {
-            Text("No PRs awaiting your review").foregroundStyle(.secondary)
-                .task { await state.refreshReviewing() }
-        } else if state.reviewingPRs.isEmpty {
-            Text("Loading…").foregroundStyle(.secondary)
+        // No `.task` on a conditional view — that pattern flickers between branches
+        // mid-fetch, cancels the in-flight task, and triggers an infinite retry.
+        // Loading is driven from bootstrap and the Refresh button instead.
+        if state.reviewingPRs.isEmpty {
+            if state.isLoadingReviewing || !state.didLoadReviewingOnce {
+                Text("Loading…").foregroundStyle(.secondary)
+            } else {
+                Text("No PRs awaiting your review").foregroundStyle(.secondary)
+            }
         } else {
-            // Apply repo filter + search to reviewing PRs (sort/pin don't apply here).
             let visible = state.filteredReviewingPRs
             if visible.isEmpty {
                 Text("No PRs match").foregroundStyle(.secondary)
@@ -735,6 +738,10 @@ private struct TabSwitcher: View {
                 RoundedRectangle(cornerRadius: 5)
                     .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
             )
+            // Force the entire pill rect to be the hit-testing area. Without this,
+            // SwiftUI's default for Button-with-HStack-label is "tight" — only the
+            // text + icon glyphs accept clicks, with the surrounding padding inert.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .hoverHighlight(cornerRadius: 5)

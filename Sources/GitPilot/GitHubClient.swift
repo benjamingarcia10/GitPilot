@@ -76,6 +76,56 @@ actor GitHubClient {
         return value
     }
 
+    /// Fetches every team slug the viewer belongs to across all their orgs.
+    /// Used to filter "Reviewing" tab pills so we only show team requests that
+    /// actually mean the user is being asked — not every team on the PR.
+    func fetchViewerTeamSlugs() async throws -> Set<String> {
+        let login = try currentLogin()
+        let query = """
+        query($login: String!) {
+          viewer {
+            organizations(first: 50) {
+              nodes {
+                teams(first: 100, userLogins: [$login]) {
+                  nodes { slug }
+                }
+              }
+            }
+          }
+        }
+        """
+        let payload: [String: Any] = ["query": query, "variables": ["login": login]]
+        let data = try await graphQL(payload: payload)
+
+        struct Resp: Decodable {
+            struct Data: Decodable {
+                struct Viewer: Decodable {
+                    struct Orgs: Decodable {
+                        let nodes: [Org]
+                        struct Org: Decodable {
+                            let teams: Teams
+                            struct Teams: Decodable {
+                                let nodes: [Team]
+                                struct Team: Decodable { let slug: String }
+                            }
+                        }
+                    }
+                    let organizations: Orgs
+                }
+                let viewer: Viewer
+            }
+            let data: Data
+        }
+        let decoded = try JSONDecoder().decode(Resp.self, from: data)
+        var slugs: Set<String> = []
+        for org in decoded.data.viewer.organizations.nodes {
+            for team in org.teams.nodes {
+                slugs.insert(team.slug)
+            }
+        }
+        return slugs
+    }
+
     /// Cleared on 401 so the next call re-fetches.
     private func invalidateAuth() {
         cachedToken = nil
@@ -205,7 +255,10 @@ actor GitHubClient {
     /// a team they belong to. GitHub's `review-requested:@me` filter covers both.
     /// We also fetch each PR's reviewRequests so we can tell *how* (direct vs team)
     /// and surface that on the row.
-    func fetchReviewingPRs() async throws -> [PullRequest] {
+    /// `viewerTeamSlugs` filters team-based reviewer pills to teams the user is
+    /// actually a member of. Without this, large PRs with many team reviewers
+    /// would render irrelevant pills.
+    func fetchReviewingPRs(viewerTeamSlugs: Set<String>) async throws -> [PullRequest] {
         let viewerLogin = try currentLogin()
         let query = """
         {
@@ -295,9 +348,10 @@ actor GitHubClient {
                     guard let r = req.requestedReviewer else { continue }
                     if r.__typename == "User", r.login == viewerLogin {
                         sources.append(ReviewerSource(kind: .direct, teamSlug: nil))
-                    } else if r.__typename == "Team", let slug = r.slug {
-                        // Team-based requests in this result set must include the viewer
-                        // by membership (GitHub's filter wouldn't return otherwise).
+                    } else if r.__typename == "Team", let slug = r.slug,
+                              viewerTeamSlugs.contains(slug) {
+                        // Only show team requests where the viewer is actually a member.
+                        // PRs may have other team reviewers we want to ignore.
                         sources.append(ReviewerSource(kind: .team, teamSlug: slug))
                     }
                 }

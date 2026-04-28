@@ -5,3 +5,9 @@ DerivedData/
 .DS_Store
 build/
 GitPilot.app/
+
+# Icon generation artifacts. The .icns is a build product;
+# generate-icon.sh recreates it from render-icon.swift.
+icon-1024.png
+AppIcon.iconset/
+AppIcon.icns

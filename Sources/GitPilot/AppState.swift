@@ -42,6 +42,25 @@ final class AppState: ObservableObject {
     /// True while the reviewing-PRs query is in flight.
     @Published private(set) var isLoadingReviewing = false
 
+    /// Whether reviewing PRs have been loaded at least once. Prevents the UI from
+    /// putting `.task` on a flickering conditional and re-triggering loads in a loop.
+    @Published private(set) var didLoadReviewingOnce = false
+
+    /// Cached team slugs the viewer is a member of. Used to filter team-based
+    /// reviewer pills on the Reviewing tab.
+    private var viewerTeamSlugs: Set<String> = []
+
+    /// When the team-slug cache was last refreshed. Team membership changes
+    /// rarely (yearly for most users), so re-fetching every poll wastes ~2880
+    /// calls/day. We refresh hourly instead — pill correctness lags by at most
+    /// an hour, which is fine for a user-facing UI.
+    private var teamSlugsLastRefreshed: Date?
+    private static let teamSlugRefreshInterval: TimeInterval = 3600  // 1 hour
+
+    /// Background polling task for the Reviewing tab. Mirrors the My PRs loop
+    /// so reviewing data is always fresh by the time you switch tabs.
+    private var reviewingPollTask: Task<Void, Never>?
+
     /// Cache of which worktree we're currently creating, by PR id.
     @Published private(set) var worktreeInFlight: Set<String> = []
 
@@ -83,6 +102,49 @@ final class AppState: ObservableObject {
         didBootstrap = true
         await notifications.bootstrap()
         await checkAuth()
+        // Pre-fetch the viewer's team memberships so reviewing pills are filtered
+        // correctly on the very first refresh. Failure is non-fatal — refreshReviewing
+        // will retry hourly.
+        if case .authenticated = authStatus {
+            await refreshTeamSlugsIfStale()
+        }
+        startReviewingPolling()
+    }
+
+    /// Re-fetches viewer's team slugs if the cache is older than `teamSlugRefreshInterval`
+    /// (or never fetched). Hourly cadence is cheap and timely — team membership rarely
+    /// changes, so polling every reviewing refresh would be ~99% wasted calls.
+    private func refreshTeamSlugsIfStale() async {
+        if let last = teamSlugsLastRefreshed,
+           Date().timeIntervalSince(last) < Self.teamSlugRefreshInterval {
+            return
+        }
+        do {
+            viewerTeamSlugs = try await client.fetchViewerTeamSlugs()
+            teamSlugsLastRefreshed = Date()
+            Log.debug("viewer is on \(viewerTeamSlugs.count) teams")
+        } catch {
+            Log.debug("fetchViewerTeamSlugs failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Long-running task that polls reviewing PRs at the same interval as monitor.
+    /// Cancelled on auth failure (we already stop the My PRs monitor there too).
+    private func startReviewingPolling() {
+        reviewingPollTask?.cancel()
+        reviewingPollTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.refreshReviewing()
+                let interval = self.persistedState.settings.pollIntervalSeconds
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+        }
+    }
+
+    private func stopReviewingPolling() {
+        reviewingPollTask?.cancel()
+        reviewingPollTask = nil
     }
 
     func refreshNotificationAuth() async {
@@ -314,11 +376,17 @@ final class AppState: ObservableObject {
     func refreshReviewing() async {
         guard !isLoadingReviewing else { return }
         isLoadingReviewing = true
-        defer { isLoadingReviewing = false }
+        defer {
+            isLoadingReviewing = false
+            didLoadReviewingOnce = true
+        }
+        // Refresh team membership at most hourly. GitHub evaluates
+        // `review-requested:@me` server-side dynamically, so the PR list itself
+        // is always correct — this only governs how fresh the local pill filter is.
+        await refreshTeamSlugsIfStale()
         do {
-            let prs = try await client.fetchReviewingPRs()
-            // Enrich in parallel — same approach as the main monitor, but inline
-            // because PRMonitor isn't aware of the reviewing list.
+            let prs = try await client.fetchReviewingPRs(viewerTeamSlugs: viewerTeamSlugs)
+            try Task.checkCancellation()
             var enriched = prs
             await withTaskGroup(of: (Int, PREnrichment?).self) { group in
                 for (idx, pr) in prs.enumerated() {
@@ -341,9 +409,16 @@ final class AppState: ObservableObject {
                 }
             }
             reviewingPRs = enriched
+        } catch is CancellationError {
+            // Outer task was cancelled — happens when SwiftUI views re-render or
+            // the user switches tabs mid-fetch. Not a real error; stay silent.
         } catch let err as GitHubClientError where err.isAuthError {
+            stopReviewingPolling()
             authStatus = .needsReauth(reason: err.localizedDescription)
         } catch {
+            // URLSession also surfaces cancellation as -999. Silence those too.
+            let nsErr = error as NSError
+            if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
             Log.debug("refreshReviewing failed: \(error.localizedDescription)")
         }
     }

@@ -6,6 +6,9 @@ DerivedData/
 build/
 GitPilot.app/
 
+# Distribution artifacts produced by scripts/package.sh.
+dist/
+
 # Icon generation artifacts. The .icns is a build product;
 # generate-icon.sh recreates it from render-icon.swift.
 icon-1024.png

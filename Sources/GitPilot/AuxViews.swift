@@ -292,7 +292,8 @@ struct SettingsSection: View {
 
     /// Auto-merge method per repo. Default = auto-pick using SQUASH > MERGE > REBASE
     /// among whatever the repo allows. Each option in the picker shows the resolved
-    /// method so the user sees exactly what will run.
+    /// method so the user sees exactly what will run. Single-method repos render
+    /// as a static label since there's nothing to override.
     @ViewBuilder
     private var perRepoMergeMethods: some View {
         if !state.seenRepos.isEmpty {
@@ -303,24 +304,37 @@ struct SettingsSection: View {
                 HStack {
                     Text(repo.key).font(.caption).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Picker("", selection: Binding(
-                        get: { state.persistedState.perRepoMergeMethod[repo.key] ?? "" },
-                        set: { newValue in
-                            state.setPerRepoMergeMethod(repo.key, method: newValue.isEmpty ? nil : newValue)
-                        }
-                    )) {
-                        Text(defaultLabel(for: repo.allowed)).tag("")
-                        ForEach(GitHubClient.MergeMethod.allCases, id: \.rawValue) { m in
-                            if repo.allowed.contains(m.rawValue) {
-                                Text(m.label).tag(m.rawValue)
-                            }
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 160)
+                    repoMethodControl(for: repo)
                 }
             }
+        }
+    }
+
+    /// Static label when only one method is allowed (nothing to override);
+    /// otherwise a picker with Default + each explicit alternative.
+    @ViewBuilder
+    private func repoMethodControl(for repo: (key: String, allowed: Set<String>)) -> some View {
+        if repo.allowed.count <= 1 {
+            Text(defaultLabel(for: repo.allowed))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            Picker("", selection: Binding(
+                get: { state.persistedState.perRepoMergeMethod[repo.key] ?? "" },
+                set: { newValue in
+                    state.setPerRepoMergeMethod(repo.key, method: newValue.isEmpty ? nil : newValue)
+                }
+            )) {
+                Text(defaultLabel(for: repo.allowed)).tag("")
+                ForEach(GitHubClient.MergeMethod.allCases, id: \.rawValue) { m in
+                    if repo.allowed.contains(m.rawValue) {
+                        Text(m.label).tag(m.rawValue)
+                    }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: 160)
         }
     }
 

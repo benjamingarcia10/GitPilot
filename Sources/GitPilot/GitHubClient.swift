@@ -153,14 +153,24 @@ actor GitHubClient {
 
     // MARK: - PR fetch (two-phase)
 
+    /// Sanity cap on total PRs fetched per refresh, across all pages. Protects
+    /// against a runaway loop if GitHub's pagination misbehaves and against
+    /// degenerate accounts (bots, machine users) where fetching everything
+    /// would burn the rate limit each refresh. 1000 is generous for humans.
+    private static let pageFetchCap = 1000
+
     /// Phase 1: lightweight list via `viewer.pullRequests` — a direct association lookup,
     /// faster than going through the search index. Excludes mergeStateStatus/mergeable/
     /// reviewDecision because GitHub computes those lazily and they can be slow.
+    /// Paginates with first:100 + endCursor until hasNextPage is false (or we hit
+    /// the safety cap). Replaces the previous hard-coded 25-PR limit so users
+    /// with many open PRs don't silently lose the tail of their list.
     func fetchMyOpenPRs() async throws -> [PullRequest] {
         let query = """
-        {
+        query($cursor: String) {
           viewer {
-            pullRequests(states: OPEN, first: 25, orderBy: {field: UPDATED_AT, direction: DESC}) {
+            pullRequests(states: OPEN, first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              pageInfo { hasNextPage endCursor }
               nodes {
                 id
                 number
@@ -184,14 +194,17 @@ actor GitHubClient {
           }
         }
         """
-        let t0 = Date()
-        let data = try await graphQL(payload: ["query": query])
-        Log.debug("phase1 fetchMyOpenPRs", elapsed: t0)
-
         struct GQLResponse: Decodable {
             struct Data: Decodable {
                 struct Viewer: Decodable {
-                    struct PRConnection: Decodable { let nodes: [PRNode] }
+                    struct PRConnection: Decodable {
+                        let pageInfo: PageInfo
+                        let nodes: [PRNode]
+                        struct PageInfo: Decodable {
+                            let hasNextPage: Bool
+                            let endCursor: String?
+                        }
+                    }
                     let pullRequests: PRConnection
                 }
                 let viewer: Viewer
@@ -220,14 +233,25 @@ actor GitHubClient {
             let data: Data
         }
 
-        do {
-            let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
-            return decoded.data.viewer.pullRequests.nodes.map { node in
+        var all: [PullRequest] = []
+        var cursor: String? = nil
+        let t0 = Date()
+        while all.count < Self.pageFetchCap {
+            let payload: [String: Any] = [
+                "query": query,
+                "variables": ["cursor": cursor as Any],
+            ]
+            let data = try await graphQL(payload: payload)
+            let decoded: GQLResponse
+            do { decoded = try JSONDecoder().decode(GQLResponse.self, from: data) }
+            catch { throw GitHubClientError.decodingFailed(String(describing: error)) }
+            let conn = decoded.data.viewer.pullRequests
+            for node in conn.nodes {
                 var allowed: Set<String> = []
                 if node.repository.mergeCommitAllowed == true { allowed.insert("MERGE") }
                 if node.repository.squashMergeAllowed == true { allowed.insert("SQUASH") }
                 if node.repository.rebaseMergeAllowed == true { allowed.insert("REBASE") }
-                return PullRequest(
+                all.append(PullRequest(
                     nodeId: node.id,
                     number: node.number,
                     title: node.title,
@@ -244,11 +268,17 @@ actor GitHubClient {
                     mergeStateStatus: nil,
                     reviewDecision: nil,
                     allowedMergeMethods: allowed
-                )
+                ))
             }
-        } catch {
-            throw GitHubClientError.decodingFailed(String(describing: error))
+            if !conn.pageInfo.hasNextPage { break }
+            cursor = conn.pageInfo.endCursor
+            if cursor == nil { break }  // defensive: hasNextPage true but no cursor
         }
+        if all.count >= Self.pageFetchCap {
+            Log.warn("fetchMyOpenPRs hit cap of \(Self.pageFetchCap) — older PRs are not loaded")
+        }
+        Log.debug("phase1 fetchMyOpenPRs returned \(all.count) PRs", elapsed: t0)
+        return all
     }
 
     /// Fetches PRs where the viewer is requested as a reviewer — directly OR via
@@ -261,8 +291,9 @@ actor GitHubClient {
     func fetchReviewingPRs(viewerTeamSlugs: Set<String>) async throws -> [PullRequest] {
         let viewerLogin = try currentLogin()
         let query = """
-        {
-          search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 25) {
+        query($cursor: String) {
+          search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               ... on PullRequest {
                 id number title url
@@ -289,13 +320,17 @@ actor GitHubClient {
           }
         }
         """
-        let t0 = Date()
-        let data = try await graphQL(payload: ["query": query])
-        Log.debug("fetchReviewingPRs", elapsed: t0)
 
         struct GQLResponse: Decodable {
             struct Data: Decodable {
-                struct Search: Decodable { let nodes: [PRNode] }
+                struct Search: Decodable {
+                    let pageInfo: PageInfo
+                    let nodes: [PRNode]
+                    struct PageInfo: Decodable {
+                        let hasNextPage: Bool
+                        let endCursor: String?
+                    }
+                }
                 let search: Search
             }
             struct PRNode: Decodable {
@@ -335,9 +370,20 @@ actor GitHubClient {
             let data: Data
         }
 
-        do {
-            let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
-            return decoded.data.search.nodes.map { node in
+        var all: [PullRequest] = []
+        var cursor: String? = nil
+        let t0 = Date()
+        while all.count < Self.pageFetchCap {
+            let payload: [String: Any] = [
+                "query": query,
+                "variables": ["cursor": cursor as Any],
+            ]
+            let data = try await graphQL(payload: payload)
+            let decoded: GQLResponse
+            do { decoded = try JSONDecoder().decode(GQLResponse.self, from: data) }
+            catch { throw GitHubClientError.decodingFailed(String(describing: error)) }
+            let conn = decoded.data.search
+            for node in conn.nodes {
                 var allowed: Set<String> = []
                 if node.repository.mergeCommitAllowed == true { allowed.insert("MERGE") }
                 if node.repository.squashMergeAllowed == true { allowed.insert("SQUASH") }
@@ -355,7 +401,7 @@ actor GitHubClient {
                         sources.append(ReviewerSource(kind: .team, teamSlug: slug))
                     }
                 }
-                return PullRequest(
+                all.append(PullRequest(
                     nodeId: node.id,
                     number: node.number,
                     title: node.title,
@@ -373,11 +419,17 @@ actor GitHubClient {
                     mergeStateStatus: nil,
                     reviewDecision: nil,
                     allowedMergeMethods: allowed
-                )
+                ))
             }
-        } catch {
-            throw GitHubClientError.decodingFailed(String(describing: error))
+            if !conn.pageInfo.hasNextPage { break }
+            cursor = conn.pageInfo.endCursor
+            if cursor == nil { break }
         }
+        if all.count >= Self.pageFetchCap {
+            Log.warn("fetchReviewingPRs hit cap of \(Self.pageFetchCap) — older PRs are not loaded")
+        }
+        Log.debug("fetchReviewingPRs returned \(all.count) PRs", elapsed: t0)
+        return all
     }
 
     /// Phase 2: per-PR enrichment with the slow fields. Run these in parallel from the caller.

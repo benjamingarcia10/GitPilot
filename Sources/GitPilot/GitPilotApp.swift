@@ -177,6 +177,9 @@ private struct MenuContent: View {
             RefreshButton(
                 isRefreshing: monitor.isRefreshing || state.isLoadingReviewing,
                 isEnabled: state.authStatus.isAuthenticated,
+                enrichmentFailureCount: state.currentTab == .reviewing
+                    ? state.reviewingEnrichmentFailureCount
+                    : monitor.enrichmentFailureCount,
                 action: {
                     Task {
                         switch state.currentTab {
@@ -264,6 +267,9 @@ private struct MenuContent: View {
         // Loading is driven from bootstrap and the Refresh button; never attach
         // `.task` to a conditional view that the load itself would flicker out
         // of existence (causes an infinite cancel/retry loop).
+        if let err = state.reviewingLastError {
+            Text(err).foregroundStyle(.red).font(.caption)
+        }
         if state.reviewingPRs.isEmpty {
             if state.isLoadingReviewing || !state.didLoadReviewingOnce {
                 Text("Loading…").foregroundStyle(.secondary)

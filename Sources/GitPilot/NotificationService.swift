@@ -9,6 +9,9 @@ enum NotificationCategory {
     static let autoRebaseFailed = "GP_AUTO_REBASE_FAILED"
     static let autoMergeFailed = "GP_AUTO_MERGE_FAILED"
     static let autoMergeCompleted = "GP_AUTO_MERGE_COMPLETED"
+    static let manualRebaseFailed = "GP_MANUAL_REBASE_FAILED"
+    static let worktreeFailed = "GP_WORKTREE_FAILED"
+    static let conflicts = "GP_CONFLICTS"
 }
 
 enum NotificationAction {
@@ -116,9 +119,31 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
             options: []
         )
 
+        let manualRebaseFailed = UNNotificationCategory(
+            identifier: NotificationCategory.manualRebaseFailed,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        let worktreeFailed = UNNotificationCategory(
+            identifier: NotificationCategory.worktreeFailed,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        let conflicts = UNNotificationCategory(
+            identifier: NotificationCategory.conflicts,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
         center.setNotificationCategories([
             needsUpdate, readyToMerge, testsFailing,
             autoRebaseFailed, autoMergeFailed, autoMergeCompleted,
+            manualRebaseFailed, worktreeFailed, conflicts,
         ])
     }
 
@@ -188,6 +213,39 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         )
     }
 
+    func notifyManualRebaseFailed(pr: PullRequest, reason: String) async {
+        await notify(
+            pr: pr,
+            idPrefix: "rebase-failed",
+            title: "Rebase failed",
+            subtitle: "PR #\(pr.number)",
+            body: "\(pr.title)\n\(reason)",
+            category: NotificationCategory.manualRebaseFailed
+        )
+    }
+
+    func notifyConflicts(pr: PullRequest) async {
+        await notify(
+            pr: pr,
+            idPrefix: "conflicts",
+            title: "Merge conflict",
+            subtitle: "PR #\(pr.number)",
+            body: "\(pr.title)\nNeeds local resolution against \(pr.baseRefName)",
+            category: NotificationCategory.conflicts
+        )
+    }
+
+    func notifyWorktreeFailed(pr: PullRequest, reason: String) async {
+        await notify(
+            pr: pr,
+            idPrefix: "worktree-failed",
+            title: "Worktree operation failed",
+            subtitle: "PR #\(pr.number)",
+            body: "\(pr.title)\n\(reason)",
+            category: NotificationCategory.worktreeFailed
+        )
+    }
+
     /// Single scheduling entry — every notify* method routes through this so
     /// the boilerplate (content, category, sound, userInfo, request id) lives
     /// in one place.
@@ -207,7 +265,11 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         content.sound = .default
         content.userInfo = ["prId": pr.id, "url": pr.url.absoluteString]
         let req = UNNotificationRequest(identifier: "\(idPrefix)-\(pr.id)", content: content, trigger: nil)
-        do { try await center.add(req) } catch { Log.debug("Notification add failed: \(error)") }
+        // warn level so a failed notification is visible without GITPILOT_DEBUG=1.
+        // The activity entry was already recorded by the caller, so the user can
+        // still see what happened via the Activity tab; this surfaces *why* the
+        // notification didn't appear.
+        do { try await center.add(req) } catch { Log.warn("Notification add failed: \(error.localizedDescription)") }
     }
 
     // MARK: - UNUserNotificationCenterDelegate

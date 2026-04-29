@@ -55,22 +55,36 @@ struct SearchBar: View {
 
 /// Circular-arrow button that spins while a refresh is in flight and is
 /// disabled while either refreshing or unauthenticated, so users can't spam-click.
+/// The hover tooltip surfaces the per-PR enrichment failure count when non-zero —
+/// otherwise users would see rows stuck in "loading…" with no signal as to why.
 struct RefreshButton: View {
     let isRefreshing: Bool
     let isEnabled: Bool
+    /// Number of per-PR enrichment failures from the last refresh. Displayed as
+    /// a small red badge if > 0, with a tooltip explaining what it means.
+    var enrichmentFailureCount: Int = 0
     let action: () -> Void
 
     @State private var degrees: Double = 0
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "arrow.clockwise")
-                .imageScale(.medium)
-                .rotationEffect(.degrees(degrees))
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "arrow.clockwise")
+                    .imageScale(.medium)
+                    .rotationEffect(.degrees(degrees))
+                if enrichmentFailureCount > 0 {
+                    // Small red dot — visible without dominating the menu bar header.
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 4, y: -2)
+                }
+            }
         }
         .buttonStyle(.hover)
         .disabled(!isEnabled || isRefreshing)
-        .help(isRefreshing ? "Refreshing…" : "Refresh")
+        .help(tooltip)
         .onChange(of: isRefreshing) { refreshing in
             if refreshing {
                 // Repeat-forever animation drives a continuous spin until isRefreshing flips false.
@@ -84,6 +98,15 @@ struct RefreshButton: View {
                 }
             }
         }
+    }
+
+    private var tooltip: String {
+        if isRefreshing { return "Refreshing…" }
+        if enrichmentFailureCount > 0 {
+            let plural = enrichmentFailureCount == 1 ? "PR" : "PRs"
+            return "Refresh — \(enrichmentFailureCount) \(plural) failed to load detail. Retry."
+        }
+        return "Refresh"
     }
 }
 
@@ -238,6 +261,9 @@ struct SettingsSection: View {
     @ViewBuilder
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let err = state.lastSaveError {
+                saveErrorBanner(err)
+            }
             pollIntervalRow
             notificationToggles
             perRepoMergeMethods
@@ -248,6 +274,34 @@ struct SettingsSection: View {
             testNotificationRow
         }
         .padding(.top, 4)
+    }
+
+    /// Inline warning shown when the most recent persistence write failed —
+    /// without this, a save problem (full disk, permissions) would silently
+    /// drop your pinned/snooze/auto-* state with no user-visible signal.
+    private func saveErrorBanner(_ err: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.caption)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Settings failed to save").font(.caption.weight(.semibold))
+                Text(err).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                    .help(err)
+            }
+            Spacer()
+            Button(action: { state.dismissSaveError() }) {
+                Image(systemName: "xmark").font(.caption2).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Dismiss (will reappear if the next save also fails)")
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(Color.orange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 
     private var pollIntervalRow: some View {
@@ -285,6 +339,12 @@ struct SettingsSection: View {
             set: { v in state.updateSettings { $0.enableTestsFailingNotification = v } }
         ))
         .font(.caption)
+        Toggle("Notify on merge conflict", isOn: Binding(
+            get: { state.persistedState.settings.enableConflictsNotification },
+            set: { v in state.updateSettings { $0.enableConflictsNotification = v } }
+        ))
+        .font(.caption)
+        .help("Fires when a PR transitions to merge conflict — actionable, since it requires a local resolve.")
         Toggle("Notify on auto-rebase failure", isOn: Binding(
             get: { state.persistedState.settings.enableAutoRebaseFailureNotification },
             set: { v in state.updateSettings { $0.enableAutoRebaseFailureNotification = v } }
@@ -301,6 +361,17 @@ struct SettingsSection: View {
         ))
         .font(.caption)
         .help("Off by default — activity log already records every merge.")
+        Toggle("Notify on manual rebase failure", isOn: Binding(
+            get: { state.persistedState.settings.enableManualRebaseFailureNotification },
+            set: { v in state.updateSettings { $0.enableManualRebaseFailureNotification = v } }
+        ))
+        .font(.caption)
+        .help("Off by default — the inline button gives you contextual feedback. Opt in if you tend to walk away after clicking Rebase.")
+        Toggle("Notify on worktree failure", isOn: Binding(
+            get: { state.persistedState.settings.enableWorktreeFailureNotification },
+            set: { v in state.updateSettings { $0.enableWorktreeFailureNotification = v } }
+        ))
+        .font(.caption)
     }
 
     /// Auto-merge method per repo. Default = auto-pick using SQUASH > MERGE > REBASE

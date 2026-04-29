@@ -188,7 +188,7 @@ struct PRRow: View {
         }
         Divider()
         Button(state.isAutoRebase(pr.id) ? "Disable auto-rebase" : "Enable auto-rebase") {
-            state.toggleAutoRebase(pr.id)
+            Task { await state.toggleAutoRebase(pr.id) }
         }
         let inFlight = state.autoMergeInFlight.contains(pr.id)
         Button(autoMergeMenuLabel(inFlight: inFlight)) {

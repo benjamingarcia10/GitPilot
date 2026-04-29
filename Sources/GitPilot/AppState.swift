@@ -15,8 +15,16 @@ final class AppState: ObservableObject {
     /// Drives the auth banner in the menu UI.
     @Published var authStatus: AuthStatus = .unknown
 
-    /// Selected repo filter for the menu. `nil` means "All".
-    @Published var repoFilter: String? = nil
+    /// Selected repo filter for the menu. `nil` means "All". didSet persists the
+    /// choice into `settings.defaultRepoFilter` so the filter survives restarts —
+    /// the previous behavior had it read on init but never written, so the field
+    /// was effectively dead.
+    @Published var repoFilter: String? = nil {
+        didSet {
+            guard didInit, oldValue != repoFilter else { return }
+            mutate { $0.settings.defaultRepoFilter = repoFilter }
+        }
+    }
 
     /// Free-text search applied to PR title, number, repo, branch.
     @Published var searchText: String = ""
@@ -35,8 +43,15 @@ final class AppState: ObservableObject {
     @Published private(set) var autoMergeInFlight: Set<String> = []
 
     /// Active top-level view in the menu. Persisted across launches via UserDefaults
-    /// (lighter than another field on PersistedState since it's pure UI state).
-    @Published var currentTab: AppTab = .myPRs
+    /// (lighter than another field on PersistedState since it's pure UI state — no
+    /// debounce/atomic-write cost for a tab change).
+    @Published var currentTab: AppTab = .myPRs {
+        didSet {
+            guard didInit, oldValue != currentTab else { return }
+            UserDefaults.standard.set(currentTab.rawValue, forKey: Self.currentTabKey)
+        }
+    }
+    private static let currentTabKey = "GitPilot.currentTab"
 
     /// PRs where the user is requested as a reviewer (direct or via team membership).
     @Published private(set) var reviewingPRs: [PullRequest] = []
@@ -80,11 +95,25 @@ final class AppState: ObservableObject {
     /// labels read accurately ("Removing…" vs "Creating…").
     @Published private(set) var worktreeRemoveInFlight: Set<String> = []
 
+    /// Last error from `refreshReviewing`. Mirrors PRMonitor.lastError so the
+    /// Reviewing tab has the same kind of in-tab error banner that My PRs has.
+    /// Cleared on a successful refresh.
+    @Published private(set) var reviewingLastError: String? = nil
+
+    /// Most recent persistence-save failure message, if any. Surfaced as a small
+    /// banner in the Settings disclosure so users know their pinned/snooze/etc.
+    /// state isn't actually being saved to disk. Cleared on the next successful save.
+    @Published private(set) var lastSaveError: String? = nil
+
     /// All persisted state. Mutated only via mutate(_:) which also schedules a save.
     @Published private(set) var persistedState: PersistedState = PersistedState()
 
     /// SwiftUI's `.task` re-fires when the popover reappears. Bootstrap must be idempotent.
     private var didBootstrap = false
+
+    /// Bootstrap-time guard so the @Published `repoFilter` initializer below
+    /// doesn't trigger a save during init (we're just hydrating from disk).
+    private var didInit = false
 
     init() {
         let persisted = PersistenceStore.load()
@@ -93,6 +122,10 @@ final class AppState: ObservableObject {
         self.monitor = PRMonitor(client: client, pollInterval: persisted.settings.pollIntervalSeconds)
         self.persistedState = persisted
         self.repoFilter = persisted.settings.defaultRepoFilter
+        if let raw = UserDefaults.standard.string(forKey: Self.currentTabKey),
+           let tab = AppTab(rawValue: raw) {
+            self.currentTab = tab
+        }
         self.notifications = NotificationService()
 
         // Wire callbacks now that all stored properties are initialized and
@@ -112,6 +145,9 @@ final class AppState: ObservableObject {
         self.monitor.onListSettled = { [weak self] liveIds in
             self?.cleanDedupeForClosedPRs(liveIds: liveIds)
         }
+        // After all stored properties are set, mark init done. Subsequent
+        // assignments to `repoFilter` will now persist via its didSet.
+        didInit = true
     }
 
     // MARK: - Bootstrap & auth
@@ -221,15 +257,20 @@ final class AppState: ObservableObject {
             guard let self else { return }
             let snapshot = self.persistedState
             // Move the encode + write off the main actor.
-            await Task.detached { PersistenceStore.save(snapshot) }.value
+            let result = await Task.detached { PersistenceStore.save(snapshot) }.value
+            self.lastSaveError = result
         }
     }
 
     /// Synchronous flush — called from app termination so nothing pending is dropped.
     func flushPendingSave() {
         pendingSaveTask?.cancel()
-        PersistenceStore.save(persistedState)
+        lastSaveError = PersistenceStore.save(persistedState)
     }
+
+    /// User-facing dismiss for the save-error banner. The banner re-appears if
+    /// the next save also fails.
+    func dismissSaveError() { lastSaveError = nil }
 
     // MARK: - Pin / snooze / auto-rebase API for the UI
 
@@ -272,6 +313,7 @@ final class AppState: ObservableObject {
             s.notifiedNeedsUpdate.remove(prId)
             s.notifiedReadyToMerge.remove(prId)
             s.notifiedBlockedByTests.remove(prId)
+            s.notifiedConflicts.remove(prId)
         }
         if let pr = lookupPR(prId) {
             let mins = Int(duration / 60)
@@ -284,10 +326,22 @@ final class AppState: ObservableObject {
         if let pr = lookupPR(prId) { record(.unsnoozed, pr: pr) }
     }
 
-    func toggleAutoRebase(_ prId: String) {
+    /// Toggle auto-rebase. When enabling and the PR is currently behind base,
+    /// kick off the rebase immediately — previously the flag would only act on
+    /// the next BEHIND transition, so a PR already in that state would just sit
+    /// there waiting indefinitely.
+    func toggleAutoRebase(_ prId: String) async {
+        let willEnable = !persistedState.autoRebase.contains(prId)
         mutate { s in
-            if s.autoRebase.contains(prId) { s.autoRebase.remove(prId) }
-            else { s.autoRebase.insert(prId) }
+            if willEnable { s.autoRebase.insert(prId) }
+            else { s.autoRebase.remove(prId) }
+        }
+        guard willEnable, let pr = lookupPR(prId) else { return }
+        // Mark dedupe so the post-rebase refresh doesn't immediately re-notify
+        // about the same BEHIND state and potentially run a second auto-rebase.
+        if pr.needsBranchUpdate {
+            mutate { $0.notifiedNeedsUpdate.insert(prId) }
+            await runAutoRebase(pr: pr)
         }
     }
 
@@ -348,6 +402,12 @@ final class AppState: ObservableObject {
                 let msg = error.localizedDescription.lowercased()
                 if !msg.contains("not enabled") && !msg.contains("not auto") {
                     record(.autoMergeFailed, pr: pr, detail: "GitHub-side disable: \(error.localizedDescription)")
+                    if persistedState.settings.enableAutoMergeFailureNotification {
+                        await notifications.notifyAutoMergeFailed(
+                            pr: pr,
+                            reason: "GitHub-side disable failed: \(error.localizedDescription)"
+                        )
+                    }
                 }
                 Log.debug("auto-merge \(prId) GitHub-side disable: \(error.localizedDescription)")
             }
@@ -370,6 +430,9 @@ final class AppState: ObservableObject {
             let reason = "Repo \(pr.repoOwner)/\(pr.repoName) allows no merge methods."
             Log.debug("auto-merge \(pr.id) client-side: \(reason), dropping flag")
             record(.autoMergeFailed, pr: pr, detail: reason)
+            if persistedState.settings.enableAutoMergeFailureNotification {
+                await notifications.notifyAutoMergeFailed(pr: pr, reason: reason)
+            }
             mutate { $0.autoMerge.remove(pr.id) }
             return
         }
@@ -458,6 +521,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Reviewer PRs
 
+    /// Number of per-PR enrichment failures from the most recent reviewing refresh.
+    /// Surfaced via the refresh button tooltip when the user hovers, so they know
+    /// why some Reviewing rows might be stuck in "loading…".
+    @Published private(set) var reviewingEnrichmentFailureCount: Int = 0
+
     func refreshReviewing() async {
         guard !isLoadingReviewing else { return }
         isLoadingReviewing = true
@@ -472,6 +540,8 @@ final class AppState: ObservableObject {
         do {
             let prs = try await client.fetchReviewingPRs(viewerTeamSlugs: viewerTeamSlugs)
             try Task.checkCancellation()
+            // A fetch made it through — clear any prior error banner.
+            reviewingLastError = nil
             // Carry forward enrichment from the previous snapshot so rows don't
             // flash to "loading" while phase-2 fetches in the background.
             let previousById = Dictionary(uniqueKeysWithValues: reviewingPRs.map { ($0.id, $0) })
@@ -485,6 +555,7 @@ final class AppState: ObservableObject {
             // so rows light up incrementally on the Reviewing tab too. The lookup
             // is by `prId` (not array index) so concurrent edits to reviewingPRs
             // don't corrupt the apply.
+            var failureCount = 0
             await withTaskGroup(of: (String, PREnrichment?).self) { group in
                 for pr in prs {
                     let prId = pr.id
@@ -500,12 +571,17 @@ final class AppState: ObservableObject {
                     }
                 }
                 for await (prId, e) in group {
-                    guard let e, !Task.isCancelled else { continue }
+                    if Task.isCancelled { continue }
+                    guard let e else {
+                        failureCount += 1
+                        continue
+                    }
                     if let idx = reviewingPRs.firstIndex(where: { $0.id == prId }) {
                         reviewingPRs[idx].apply(e)
                     }
                 }
             }
+            reviewingEnrichmentFailureCount = failureCount
         } catch is CancellationError {
             // Outer task was cancelled — happens when SwiftUI views re-render or
             // the user switches tabs mid-fetch. Not a real error; stay silent.
@@ -516,6 +592,7 @@ final class AppState: ObservableObject {
             let nsErr = error as NSError
             if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
             Log.debug("refreshReviewing failed: \(error.localizedDescription)")
+            reviewingLastError = error.localizedDescription
         }
     }
 
@@ -534,7 +611,9 @@ final class AppState: ObservableObject {
             let probed = WorktreeManager.repoSearchCandidates(owner: pr.repoOwner, name: pr.repoName)
             let reason = "No local checkout for \(pr.repoOwner)/\(pr.repoName). Probed: \(probed.joined(separator: ", "))"
             record(.worktreeCreateFailed, pr: pr, detail: reason)
-            await notifications.notifyAutoRebaseFailed(pr: pr, reason: reason)
+            if persistedState.settings.enableWorktreeFailureNotification {
+                await notifications.notifyWorktreeFailed(pr: pr, reason: reason)
+            }
             return
         }
         let worktreePath = WorktreeManager.resolvePath(
@@ -553,7 +632,9 @@ final class AppState: ObservableObject {
         } catch {
             Log.debug("createWorktree \(pr.id) failed: \(error.localizedDescription)")
             record(.worktreeCreateFailed, pr: pr, detail: error.localizedDescription)
-            await notifications.notifyAutoRebaseFailed(pr: pr, reason: error.localizedDescription)
+            if persistedState.settings.enableWorktreeFailureNotification {
+                await notifications.notifyWorktreeFailed(pr: pr, reason: error.localizedDescription)
+            }
         }
     }
 
@@ -590,6 +671,9 @@ final class AppState: ObservableObject {
         } catch {
             Log.debug("removeWorktree \(prId) failed: \(error.localizedDescription)")
             record(.worktreeRemoveFailed, pr: pr, detail: error.localizedDescription)
+            if persistedState.settings.enableWorktreeFailureNotification {
+                await notifications.notifyWorktreeFailed(pr: pr, reason: error.localizedDescription)
+            }
         }
     }
 
@@ -715,13 +799,15 @@ final class AppState: ObservableObject {
         recomputeSeenRepos()
         let staleKeys = persistedState.notifiedNeedsUpdate.union(
                           persistedState.notifiedReadyToMerge).union(
-                          persistedState.notifiedBlockedByTests)
+                          persistedState.notifiedBlockedByTests).union(
+                          persistedState.notifiedConflicts)
             .subtracting(liveIds)
         if !staleKeys.isEmpty {
             mutate { s in
                 s.notifiedNeedsUpdate.subtract(staleKeys)
                 s.notifiedReadyToMerge.subtract(staleKeys)
                 s.notifiedBlockedByTests.subtract(staleKeys)
+                s.notifiedConflicts.subtract(staleKeys)
             }
         }
         expandedPRs.formIntersection(liveIds.union(reviewingPRs.map(\.id)))
@@ -802,6 +888,24 @@ final class AppState: ObservableObject {
                 mutate { $0.notifiedBlockedByTests.remove(pr.id) }
             }
         }
+
+        // MERGE CONFLICTS — actionable: requires a local checkout + manual resolve.
+        // The activity kind was declared and the row UI rendered it, but no path
+        // recorded it. Now mirrors the structure of the other transitions: dedupe
+        // set, transition activity, optional notification.
+        if pr.hasConflicts {
+            if !persistedState.notifiedConflicts.contains(pr.id) {
+                mutate { $0.notifiedConflicts.insert(pr.id) }
+                record(.becameConflicts, pr: pr)
+                if persistedState.settings.enableConflictsNotification {
+                    await notifications.notifyConflicts(pr: pr)
+                }
+            }
+        } else {
+            if persistedState.notifiedConflicts.contains(pr.id) {
+                mutate { $0.notifiedConflicts.remove(pr.id) }
+            }
+        }
     }
 
     /// Auto-rebase path: try the mutation; on failure, notify (if enabled) and
@@ -845,6 +949,9 @@ final class AppState: ObservableObject {
             // only a stderr log was the previous (silent) failure mode.
             Log.debug("rebase \(prId) failed: \(error.localizedDescription)")
             record(.rebaseFailed, pr: pr, detail: error.localizedDescription)
+            if persistedState.settings.enableManualRebaseFailureNotification {
+                await notifications.notifyManualRebaseFailed(pr: pr, reason: error.localizedDescription)
+            }
         }
     }
 
@@ -878,6 +985,12 @@ final class AppState: ObservableObject {
         await notifications.notifyNeedsUpdate(pr: pr)
         await notifications.notifyReadyToMerge(pr: pr)
         await notifications.notifyTestsFailing(pr: pr)
+        await notifications.notifyConflicts(pr: pr)
+        await notifications.notifyAutoRebaseFailed(pr: pr, reason: "Test")
+        await notifications.notifyAutoMergeFailed(pr: pr, reason: "Test")
+        await notifications.notifyAutoMergeCompleted(pr: pr, method: "Squash")
+        await notifications.notifyManualRebaseFailed(pr: pr, reason: "Test")
+        await notifications.notifyWorktreeFailed(pr: pr, reason: "Test")
     }
 
     // MARK: - UI derivations

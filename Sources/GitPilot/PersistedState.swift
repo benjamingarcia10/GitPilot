@@ -76,6 +76,16 @@ struct PersistedSettings: Codable, Equatable {
     /// activity log already records every merge and the point of "auto" is to
     /// disappear. Useful for users who specifically want closure.
     var enableAutoMergeCompletedNotification: Bool = false
+    /// Notify when a manual (button-click) rebase fails. Default off — when you
+    /// click Rebase, the inline button gives you contextual feedback. Opt in if
+    /// you tend to walk away after clicking.
+    var enableManualRebaseFailureNotification: Bool = false
+    /// Notify when a worktree create or remove fails. Default on — these failures
+    /// usually mean real work is blocked (no local checkout, dirty worktree, etc.).
+    var enableWorktreeFailureNotification: Bool = true
+    /// Notify when a PR transitions to merge conflict. Default on — conflicts are
+    /// actionable and require dropping into a local worktree to resolve.
+    var enableConflictsNotification: Bool = true
     var defaultRepoFilter: String? = nil
     var sortOrder: PRSortOption = .updated
     /// Root directory for worktrees this app creates. Default expands to
@@ -101,6 +111,9 @@ struct PersistedSettings: Codable, Equatable {
         if let v = try c.decodeIfPresent(Bool.self, forKey: .enableAutoRebaseFailureNotification) { enableAutoRebaseFailureNotification = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .enableAutoMergeFailureNotification) { enableAutoMergeFailureNotification = v }
         if let v = try c.decodeIfPresent(Bool.self, forKey: .enableAutoMergeCompletedNotification) { enableAutoMergeCompletedNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableManualRebaseFailureNotification) { enableManualRebaseFailureNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableWorktreeFailureNotification) { enableWorktreeFailureNotification = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .enableConflictsNotification) { enableConflictsNotification = v }
         defaultRepoFilter = try c.decodeIfPresent(String.self, forKey: .defaultRepoFilter)
         if let v = try c.decodeIfPresent(PRSortOption.self, forKey: .sortOrder) { sortOrder = v }
         if let v = try c.decodeIfPresent(String.self, forKey: .worktreeRoot) { worktreeRoot = v }
@@ -122,6 +135,7 @@ struct PersistedState: Codable, Equatable {
     var notifiedNeedsUpdate: Set<String> = []
     var notifiedReadyToMerge: Set<String> = []
     var notifiedBlockedByTests: Set<String> = []
+    var notifiedConflicts: Set<String> = []
     var snoozedUntil: [String: Date] = [:]
     var pinned: Set<String> = []
     var autoRebase: Set<String> = []
@@ -142,6 +156,31 @@ struct PersistedState: Codable, Equatable {
     /// Only honored when `pinned` is non-empty (UI hides the toggle otherwise).
     var showPinnedOnly: Bool = false
     var settings: PersistedSettings = PersistedSettings()
+
+    init() {}
+
+    /// Custom decoder mirrors `PersistedSettings`: every field decodes via
+    /// `decodeIfPresent` so adding a new field doesn't fail the whole file
+    /// and reset everything in the catch block. The schemaVersion check still
+    /// runs in `PersistenceStore.load` for breaking schema changes.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init()
+        if let v = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) { schemaVersion = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .notifiedNeedsUpdate) { notifiedNeedsUpdate = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .notifiedReadyToMerge) { notifiedReadyToMerge = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .notifiedBlockedByTests) { notifiedBlockedByTests = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .notifiedConflicts) { notifiedConflicts = v }
+        if let v = try c.decodeIfPresent([String: Date].self, forKey: .snoozedUntil) { snoozedUntil = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .pinned) { pinned = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .autoRebase) { autoRebase = v }
+        if let v = try c.decodeIfPresent(Set<String>.self, forKey: .autoMerge) { autoMerge = v }
+        if let v = try c.decodeIfPresent([String: String].self, forKey: .perRepoMergeMethod) { perRepoMergeMethod = v }
+        if let v = try c.decodeIfPresent([String: String].self, forKey: .worktrees) { worktrees = v }
+        if let v = try c.decodeIfPresent([ActivityEvent].self, forKey: .activity) { activity = v }
+        if let v = try c.decodeIfPresent(Bool.self, forKey: .showPinnedOnly) { showPinnedOnly = v }
+        if let v = try c.decodeIfPresent(PersistedSettings.self, forKey: .settings) { settings = v }
+    }
 }
 
 /// Loads/saves PersistedState from `~/Library/Application Support/GitPilot/state.json`.
@@ -179,14 +218,21 @@ enum PersistenceStore {
         }
     }
 
-    static func save(_ state: PersistedState) {
+    /// Returns nil on success, an error message on failure. Caller surfaces the
+    /// message in the UI so a save problem (full disk, permissions, etc.) doesn't
+    /// silently lose the user's pinned/snooze/etc. state.
+    @discardableResult
+    static func save(_ state: PersistedState) -> String? {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(state)
             try data.write(to: fileURL, options: .atomic)
+            return nil
         } catch {
-            Log.debug("persistence: save failed: \(error)")
+            // warn level so it's visible without GITPILOT_DEBUG=1.
+            Log.warn("persistence: save failed: \(error.localizedDescription)")
+            return error.localizedDescription
         }
     }
 }

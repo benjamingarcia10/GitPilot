@@ -14,3 +14,6 @@ dist/
 icon-1024.png
 AppIcon.iconset/
 AppIcon.icns
+
+# Per-machine Claude Code settings (plugin enable/disable etc.).
+.claude/settings.local.json

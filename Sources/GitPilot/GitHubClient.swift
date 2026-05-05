@@ -432,29 +432,78 @@ actor GitHubClient {
         return all
     }
 
-    /// Phase 2: per-PR enrichment with the slow fields. Run these in parallel from the caller.
-    /// Retries on UNKNOWN: GitHub computes mergeStateStatus lazily, so the first call
-    /// kicks off computation and returns UNKNOWN; later calls (within seconds) return
-    /// the real value. We back off 0.5s, 1s, 2s — at most 4 attempts.
-    func enrichPR(nodeId: String) async throws -> PREnrichment {
-        var attempt = 0
-        while true {
-            attempt += 1
-            let result = try await enrichPROnce(nodeId: nodeId)
-            if result.mergeStateStatus != .unknown || attempt >= 4 {
-                return result
-            }
-            let delayMs: UInt64 = [500, 1_000, 2_000][min(attempt - 1, 2)]
-            Log.debug("enrichPR \(nodeId.suffix(8)) UNKNOWN, retrying in \(delayMs)ms (attempt \(attempt))")
-            try await Task.sleep(nanoseconds: delayMs * 1_000_000)
+    /// Phase 2: batched enrichment via `nodes(ids:)`. Replaces the previous per-PR
+    /// fan-out which was the dominant source of API call volume — for N PRs, the
+    /// old design fired N concurrent GraphQL requests every refresh tick (plus up
+    /// to 3× retries each on UNKNOWN), tripping GitHub's secondary rate limits
+    /// ("avoid concurrent requests", concurrent-request cap, points-per-minute).
+    /// One batched query collapses N enrichments into a single round trip.
+    ///
+    /// Returns a map keyed by nodeId. Missing entries indicate a PR that GitHub
+    /// returned null for (e.g. became private, was deleted) — caller treats those
+    /// as enrichment failures.
+    ///
+    /// Retries entries whose mergeStateStatus came back UNKNOWN (GitHub computes
+    /// it lazily) up to 3 more times with 0.5/1/2s backoff, just like the old
+    /// per-PR retry — the retry is now also batched, so it stays cheap.
+    ///
+    /// Chunked at 25 PRs per request to keep response size bounded; chunks run
+    /// sequentially (not concurrently) to follow GitHub's "avoid concurrent
+    /// requests" guidance.
+    func enrichPRs(nodeIds: [String]) async throws -> [String: PREnrichment] {
+        guard !nodeIds.isEmpty else { return [:] }
+        var results: [String: PREnrichment] = [:]
+        let chunkSize = 25
+        var i = 0
+        while i < nodeIds.count {
+            let chunk = Array(nodeIds[i..<min(i + chunkSize, nodeIds.count)])
+            let chunkResults = try await enrichPRsBatchWithRetry(nodeIds: chunk)
+            for (k, v) in chunkResults { results[k] = v }
+            i += chunkSize
         }
+        return results
     }
 
-    private func enrichPROnce(nodeId: String) async throws -> PREnrichment {
+    private func enrichPRsBatchWithRetry(nodeIds: [String]) async throws -> [String: PREnrichment] {
+        var pending = nodeIds
+        var results: [String: PREnrichment] = [:]
+        var attempt = 0
+        while !pending.isEmpty {
+            attempt += 1
+            let batch = try await enrichPRsOnce(nodeIds: pending)
+            var stillUnknown: [String] = []
+            for id in pending {
+                guard let e = batch[id] else { continue }  // null node — drop
+                if e.mergeStateStatus == .unknown && attempt < 4 {
+                    stillUnknown.append(id)
+                } else {
+                    results[id] = e
+                }
+            }
+            if stillUnknown.isEmpty { break }
+            // Final attempt: surface whatever we got, even if still UNKNOWN —
+            // matches old per-PR behavior (give up after 4 attempts).
+            if attempt >= 4 {
+                for id in stillUnknown {
+                    if let e = batch[id] { results[id] = e }
+                }
+                break
+            }
+            let delayMs: UInt64 = [500, 1_000, 2_000][min(attempt - 1, 2)]
+            Log.debug("enrichPRs UNKNOWN: \(stillUnknown.count) PRs, retry in \(delayMs)ms (attempt \(attempt))")
+            try await Task.sleep(nanoseconds: delayMs * 1_000_000)
+            pending = stillUnknown
+        }
+        return results
+    }
+
+    private func enrichPRsOnce(nodeIds: [String]) async throws -> [String: PREnrichment] {
         let query = """
-        query($id: ID!) {
-          node(id: $id) {
+        query($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            __typename
             ... on PullRequest {
+              id
               mergeable
               mergeStateStatus
               reviewDecision
@@ -490,14 +539,15 @@ actor GitHubClient {
           }
         }
         """
-        let payload: [String: Any] = ["query": query, "variables": ["id": nodeId]]
+        let payload: [String: Any] = ["query": query, "variables": ["ids": nodeIds]]
         let t0 = Date()
         let data = try await graphQL(payload: payload)
-        Log.debug("enrichPR \(nodeId.suffix(8))", elapsed: t0)
+        Log.debug("enrichPRs(\(nodeIds.count))", elapsed: t0)
 
         struct GQLResponse: Decodable {
-            struct Data: Decodable { let node: Node? }
+            struct Data: Decodable { let nodes: [Node?] }
             struct Node: Decodable {
+                let id: String
                 let mergeable: String?
                 let mergeStateStatus: String?
                 let reviewDecision: String?
@@ -538,43 +588,44 @@ actor GitHubClient {
             let data: Data
         }
 
-        do {
-            let decoded = try JSONDecoder().decode(GQLResponse.self, from: data)
-            guard let node = decoded.data.node else {
-                throw GitHubClientError.decodingFailed("missing node for \(nodeId)")
-            }
+        let decoded: GQLResponse
+        do { decoded = try JSONDecoder().decode(GQLResponse.self, from: data) }
+        catch { throw GitHubClientError.decodingFailed(String(describing: error)) }
+
+        var out: [String: PREnrichment] = [:]
+        for node in decoded.data.nodes {
+            guard let node else { continue }  // GitHub returns null for unknown ids
             let rollup = node.commits?.nodes.first?.commit.statusCheckRollup
             let rollupRaw = rollup?.state ?? "UNKNOWN"
-            let checks: [PRCheck] = (rollup?.contexts?.nodes ?? []).map { node in
-                if node.__typename == "CheckRun" {
+            let checks: [PRCheck] = (rollup?.contexts?.nodes ?? []).map { ctx in
+                if ctx.__typename == "CheckRun" {
                     // CheckRun's "state" comes from conclusion (when finished) or status (when in flight).
-                    let stateRaw = (node.conclusion ?? node.status ?? "UNKNOWN").uppercased()
+                    let stateRaw = (ctx.conclusion ?? ctx.status ?? "UNKNOWN").uppercased()
                     return PRCheck(
-                        id: node.id,
-                        name: node.name ?? "(unnamed check)",
+                        id: ctx.id,
+                        name: ctx.name ?? "(unnamed check)",
                         state: mapCheckRunState(stateRaw),
-                        url: node.detailsUrl ?? node.permalink
+                        url: ctx.detailsUrl ?? ctx.permalink
                     )
                 } else {
                     // StatusContext: classic commit status, "context" is the name.
                     return PRCheck(
-                        id: node.id,
-                        name: node.context ?? "(status)",
-                        state: CheckRollupState(rawValue: node.state ?? "UNKNOWN") ?? .unknown,
-                        url: node.targetUrl
+                        id: ctx.id,
+                        name: ctx.context ?? "(status)",
+                        state: CheckRollupState(rawValue: ctx.state ?? "UNKNOWN") ?? .unknown,
+                        url: ctx.targetUrl
                     )
                 }
             }
-            return PREnrichment(
+            out[node.id] = PREnrichment(
                 mergeable: node.mergeable ?? "UNKNOWN",
                 mergeStateStatus: MergeStateStatus(rawValue: node.mergeStateStatus ?? "UNKNOWN") ?? .unknown,
                 reviewDecision: node.reviewDecision,
                 checkRollupState: CheckRollupState(rawValue: rollupRaw) ?? .unknown,
                 checks: checks
             )
-        } catch {
-            throw GitHubClientError.decodingFailed(String(describing: error))
         }
+        return out
     }
 
     /// Bridge CheckRun's flat enum (conclusion or status) into our common rollup state.

@@ -96,53 +96,33 @@ final class PRMonitor: ObservableObject {
             lastError = nil
             lastRefresh = Date()
 
-            // Enrich in parallel. Each task awaits one cheap GraphQL call and updates one row.
-            // Per-task cancellation checks ensure a stop()-then-restart cycle doesn't
-            // publish stale enrichment after the new refresh has started.
-            //
-            // Auth-error handling: child tasks return their result via the enum below
-            // so we can detect the *first* 401 and cancel the entire group, instead of
-            // letting every concurrent child hit the same 401 and fan out N
-            // applyAuthFailure calls. handleAuthError is invoked once after the group exits.
+            // Batched enrichment: one GraphQL call (chunked to 25 if needed)
+            // replaces the per-PR fan-out that was the dominant source of API
+            // call volume and the cause of secondary rate-limit trips. Auth
+            // errors surface once at the call site; partial failures show up as
+            // missing keys in the result map.
             let enrichStart = Date()
-            enum ChildResult: Equatable { case ok, plainFailure, authFailure(String) }
-            var firstAuthError: String?
             var failureCount = 0
-            await withTaskGroup(of: ChildResult.self) { group in
+            do {
+                try Task.checkCancellation()
+                let enrichments = try await client.enrichPRs(nodeIds: lightPRs.map { $0.nodeId })
                 for pr in lightPRs {
-                    group.addTask { [weak self] in
-                        guard let self, !Task.isCancelled else { return .plainFailure }
-                        do {
-                            let enrichment = try await self.client.enrichPR(nodeId: pr.nodeId)
-                            guard !Task.isCancelled else { return .plainFailure }
-                            await self.applyEnrichment(prId: pr.id, enrichment: enrichment)
-                            return .ok
-                        } catch let err as GitHubClientError where err.isAuthError {
-                            return .authFailure(err.localizedDescription)
-                        } catch {
-                            // Leave the row in loading state; the failure counter will reflect this.
-                            return .plainFailure
-                        }
-                    }
-                }
-                for await result in group {
-                    switch result {
-                    case .ok:
-                        continue
-                    case .plainFailure:
+                    if Task.isCancelled { break }
+                    if let e = enrichments[pr.nodeId] {
+                        await applyEnrichment(prId: pr.id, enrichment: e)
+                    } else {
                         failureCount += 1
-                    case .authFailure(let reason):
-                        if firstAuthError == nil {
-                            firstAuthError = reason
-                            // Cancel siblings so they don't all 401 with the same stale token.
-                            group.cancelAll()
-                        }
                     }
                 }
-            }
-            if let reason = firstAuthError {
-                handleAuthError(reason)
+            } catch let err as GitHubClientError where err.isAuthError {
+                handleAuthError(err.localizedDescription)
                 return
+            } catch is CancellationError {
+                return
+            } catch {
+                // Whole-batch failure: every row stays in loading. Surface count
+                // so the refresh-button tooltip reflects it.
+                failureCount = lightPRs.count
             }
             enrichmentFailureCount = failureCount
             Log.debug("phase2 enrichment complete", elapsed: enrichStart)

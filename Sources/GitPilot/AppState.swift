@@ -551,34 +551,19 @@ final class AppState: ObservableObject {
                 merged.carryForwardEnrichment(from: prev)
                 return merged
             }
-            // Apply each enrichment per-PR as it arrives — symmetry with My PRs,
-            // so rows light up incrementally on the Reviewing tab too. The lookup
-            // is by `prId` (not array index) so concurrent edits to reviewingPRs
-            // don't corrupt the apply.
+            // Batched enrichment: one GraphQL call (chunked to 25 if needed)
+            // replaces the per-PR fan-out. Lookup is by `prId` (not array index)
+            // so concurrent edits to reviewingPRs don't corrupt the apply.
             var failureCount = 0
-            await withTaskGroup(of: (String, PREnrichment?).self) { group in
-                for pr in prs {
-                    let prId = pr.id
-                    let nodeId = pr.nodeId
-                    group.addTask { [client = self.client] in
-                        if Task.isCancelled { return (prId, nil) }
-                        do {
-                            let e = try await client.enrichPR(nodeId: nodeId)
-                            return (prId, e)
-                        } catch {
-                            return (prId, nil)
-                        }
-                    }
+            let enrichments = try await client.enrichPRs(nodeIds: prs.map { $0.nodeId })
+            try Task.checkCancellation()
+            for pr in prs {
+                guard let e = enrichments[pr.nodeId] else {
+                    failureCount += 1
+                    continue
                 }
-                for await (prId, e) in group {
-                    if Task.isCancelled { continue }
-                    guard let e else {
-                        failureCount += 1
-                        continue
-                    }
-                    if let idx = reviewingPRs.firstIndex(where: { $0.id == prId }) {
-                        reviewingPRs[idx].apply(e)
-                    }
+                if let idx = reviewingPRs.firstIndex(where: { $0.id == pr.id }) {
+                    reviewingPRs[idx].apply(e)
                 }
             }
             reviewingEnrichmentFailureCount = failureCount

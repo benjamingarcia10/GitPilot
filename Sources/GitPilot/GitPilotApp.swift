@@ -23,6 +23,12 @@ struct GitPilotApp: App {
         }
         .menuBarExtraStyle(.window)
         .commands {}
+
+        // Native Settings window — bound to Cmd+, by SwiftUI. Opened
+        // programmatically from the popover footer via `SettingsWindowOpener`.
+        Settings {
+            SettingsView(state: state)
+        }
     }
 }
 
@@ -107,8 +113,7 @@ private struct MenuBarLabel: View {
 ///   - Tab switcher
 ///   - Filters (Search / Repo / Sort) — visible only on PR-list tabs
 ///   - Tab body (My PRs / Reviewing / Activity / Worktrees)
-///   - Settings disclosure (always reachable below the tab body)
-///   - Footer (notifications-denied banner, last-updated label, Quit)
+///   - Footer (notifications-denied banner, last-updated label, Settings, Quit)
 private struct MenuContent: View {
     @ObservedObject var state: AppState
     @ObservedObject var monitor: PRMonitor
@@ -232,8 +237,6 @@ private struct MenuContent: View {
         case .activity:  ActivityTabContent(state: state)
         case .worktrees: WorktreesTabContent(state: state)
         }
-        // Settings stays below regardless of tab so it's always reachable.
-        SettingsSection(state: state)
     }
 
     @ViewBuilder
@@ -310,7 +313,7 @@ private struct MenuContent: View {
     }
 
     private var footerRow: some View {
-        HStack {
+        HStack(spacing: 8) {
             if let last = monitor.lastRefresh {
                 // Wrap in TimelineView so the "Xs ago" string re-evaluates against
                 // wall-clock time. Without this, SwiftUI never re-renders the label.
@@ -321,6 +324,22 @@ private struct MenuContent: View {
                 }
             }
             Spacer()
+            // Tip the user off when persistence is failing — they'll find the
+            // full message inside the Settings window where it can be dismissed.
+            if state.lastSaveError != nil {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+                    .help("Settings failed to save — open Settings to see why.")
+            }
+            OpenSettingsButton {
+                Label("Settings", systemImage: "gearshape")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.hover)
+            .font(.caption)
+            .help("Open Settings (⌘,)")
+
             Button("Quit") { NSApp.terminate(nil) }
                 .buttonStyle(.hover)
                 .font(.caption)

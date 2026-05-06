@@ -116,8 +116,13 @@ private struct ActivityRow: View {
         .contentShape(Rectangle())
         .hoverHighlight(cornerRadius: 4)
         .onTapGesture {
+            // Live PR wins (URL might have moved repos), then fall back to the
+            // URL captured when the event was recorded so old entries for
+            // closed/merged/private PRs still open instead of silently no-op'ing.
             if let pr = state.lookupPR(event.prId) {
                 NSWorkspace.shared.open(pr.url)
+            } else if let url = event.prURL {
+                NSWorkspace.shared.open(url)
             }
         }
     }

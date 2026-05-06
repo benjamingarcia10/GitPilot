@@ -79,36 +79,84 @@ actor GitHubClient {
     /// Fetches every team slug the viewer belongs to across all their orgs.
     /// Used to filter "Reviewing" tab pills so we only show team requests that
     /// actually mean the user is being asked — not every team on the PR.
+    ///
+    /// Both the orgs list and the per-org teams list paginate via cursors so
+    /// users in large enterprises (>50 orgs, or >100 teams in a single org)
+    /// don't silently lose pills.
+    /// Safety caps on team-slug pagination. Mirrors `pageFetchCap` for PR
+    /// queries — terminates the loop cleanly with a warn log if a degenerate
+    /// account (bot, machine user) would otherwise loop indefinitely.
+    private static let orgPageCap = 200
+    private static let teamPageCap = 200
+
     func fetchViewerTeamSlugs() async throws -> Set<String> {
         let login = try currentLogin()
-        let query = """
-        query($login: String!) {
-          viewer {
-            organizations(first: 50) {
-              nodes {
-                teams(first: 100, userLogins: [$login]) {
-                  nodes { slug }
+        var slugs: Set<String> = []
+        // Outer loop paginates the viewer's organizations; for each org we then
+        // page through teams. Two separate queries keeps each response shape
+        // simple and avoids a triple-nested cursor query.
+        //
+        // The cap-hit log fires only when the LAST page reported `hasNextPage`
+        // AND we ran out of iterations — exiting cleanly on `!hasNext` at
+        // exactly cap pages is not a truncation and shouldn't warn.
+        var orgCursor: String? = nil
+        var orgPages = 0
+        var lastOrgHasNext = false
+        while orgPages < Self.orgPageCap {
+            orgPages += 1
+            let (orgs, hasNext, nextCursor) = try await fetchOrgLoginsPage(cursor: orgCursor)
+            lastOrgHasNext = hasNext
+            for orgLogin in orgs {
+                var teamCursor: String? = nil
+                var teamPages = 0
+                var lastTeamHasNext = false
+                while teamPages < Self.teamPageCap {
+                    teamPages += 1
+                    let (pageSlugs, teamHasNext, teamNextCursor) = try await fetchTeamSlugsPage(
+                        orgLogin: orgLogin, userLogin: login, cursor: teamCursor
+                    )
+                    lastTeamHasNext = teamHasNext
+                    slugs.formUnion(pageSlugs)
+                    if !teamHasNext { break }
+                    teamCursor = teamNextCursor
+                    if teamCursor == nil { break }
                 }
-              }
+                if lastTeamHasNext && teamPages >= Self.teamPageCap {
+                    Log.warn("fetchViewerTeamSlugs hit team page cap of \(Self.teamPageCap) in org \(orgLogin) — some team pills may be missing")
+                }
+            }
+            if !hasNext { break }
+            orgCursor = nextCursor
+            if orgCursor == nil { break }
+        }
+        if lastOrgHasNext && orgPages >= Self.orgPageCap {
+            Log.warn("fetchViewerTeamSlugs hit org page cap of \(Self.orgPageCap) — viewer is in unusually many orgs")
+        }
+        return slugs
+    }
+
+    /// One page of the viewer's organization logins.
+    private func fetchOrgLoginsPage(cursor: String?) async throws -> (logins: [String], hasNext: Bool, nextCursor: String?) {
+        let query = """
+        query($cursor: String) {
+          viewer {
+            organizations(first: 100, after: $cursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes { login }
             }
           }
         }
         """
-        let payload: [String: Any] = ["query": query, "variables": ["login": login]]
+        let payload: [String: Any] = ["query": query, "variables": ["cursor": cursor as Any]]
         let data = try await graphQL(payload: payload)
-
         struct Resp: Decodable {
             struct Data: Decodable {
                 struct Viewer: Decodable {
                     struct Orgs: Decodable {
+                        struct PageInfo: Decodable { let hasNextPage: Bool; let endCursor: String? }
+                        let pageInfo: PageInfo
                         let nodes: [Org]
-                        struct Org: Decodable {
-                            let teams: Teams
-                            struct Teams: Decodable {
-                                let nodes: [Team]
-                                struct Team: Decodable { let slug: String }
-                            }
-                        }
+                        struct Org: Decodable { let login: String }
                     }
                     let organizations: Orgs
                 }
@@ -117,13 +165,48 @@ actor GitHubClient {
             let data: Data
         }
         let decoded = try JSONDecoder().decode(Resp.self, from: data)
-        var slugs: Set<String> = []
-        for org in decoded.data.viewer.organizations.nodes {
-            for team in org.teams.nodes {
-                slugs.insert(team.slug)
+        let orgs = decoded.data.viewer.organizations
+        return (orgs.nodes.map(\.login), orgs.pageInfo.hasNextPage, orgs.pageInfo.endCursor)
+    }
+
+    /// One page of team slugs in `orgLogin` that `userLogin` is a member of.
+    private func fetchTeamSlugsPage(orgLogin: String, userLogin: String, cursor: String?) async throws -> (slugs: [String], hasNext: Bool, nextCursor: String?) {
+        let query = """
+        query($org: String!, $user: String!, $cursor: String) {
+          organization(login: $org) {
+            teams(first: 100, after: $cursor, userLogins: [$user]) {
+              pageInfo { hasNextPage endCursor }
+              nodes { slug }
             }
+          }
         }
-        return slugs
+        """
+        let payload: [String: Any] = [
+            "query": query,
+            "variables": ["org": orgLogin, "user": userLogin, "cursor": cursor as Any],
+        ]
+        let data = try await graphQL(payload: payload)
+        struct Resp: Decodable {
+            struct Data: Decodable {
+                struct Org: Decodable {
+                    struct Teams: Decodable {
+                        struct PageInfo: Decodable { let hasNextPage: Bool; let endCursor: String? }
+                        let pageInfo: PageInfo
+                        let nodes: [Team]
+                        struct Team: Decodable { let slug: String }
+                    }
+                    let teams: Teams
+                }
+                // organization can be null if the viewer loses access mid-query.
+                let organization: Org?
+            }
+            let data: Data
+        }
+        let decoded = try JSONDecoder().decode(Resp.self, from: data)
+        guard let teams = decoded.data.organization?.teams else {
+            return ([], false, nil)
+        }
+        return (teams.nodes.map(\.slug), teams.pageInfo.hasNextPage, teams.pageInfo.endCursor)
     }
 
     /// Cleared on 401 so the next call re-fetches.
@@ -629,13 +712,17 @@ actor GitHubClient {
     }
 
     /// Bridge CheckRun's flat enum (conclusion or status) into our common rollup state.
+    /// STALE means the run's results are now considered out-of-date (workflow file
+    /// changed, etc.) — not "we expect this to report soon", which is what
+    /// `.expected` encodes for branch-protection required-status semantics. Map to
+    /// `.unknown` so it shows neutral rather than a yellow "tests running" clock.
     private nonisolated func mapCheckRunState(_ raw: String) -> CheckRollupState {
         switch raw {
         case "SUCCESS", "NEUTRAL", "SKIPPED": return .success
         case "FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED": return .failure
         case "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED": return .pending
         case "ERROR": return .error
-        case "STALE": return .expected
+        case "STALE": return .unknown
         default: return .unknown
         }
     }

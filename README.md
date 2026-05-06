@@ -84,7 +84,13 @@ The "—" rows are intentionally silent: they're either successes (which would b
 
 ### Settings reference
 
-The Settings disclosure at the bottom of the menu exposes everything user-tunable. All settings persist atomically to disk and survive restarts.
+Open the Settings window with **⌘,** or by clicking the gear icon in the popover footer. Settings are organized into three tabs:
+
+- **General** — poll interval, sort order, worktree root, editor
+- **Notifications** — every notification toggle and the "Send test notification" button
+- **Repos** — per-repo auto-merge method overrides
+
+All settings persist atomically to disk and survive restarts.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -112,7 +118,7 @@ A few non-toggle behaviors that are persisted but don't need explicit settings U
 - **Activity log** — capped at 200 entries / 7 days (currently not user-tunable).
 - **PR fetch limit** — paginates with no app-side cap up to a 1000-PR safety ceiling. If you have more, you'll see a warn-level log line.
 
-If a save to disk fails, an inline orange banner appears at the top of the Settings disclosure with the error message. The banner persists until the next successful save (or you dismiss it manually).
+If a save to disk fails, a small ⚠︎ glyph appears in the popover footer next to the gear, and an inline orange banner shows at the top of every Settings tab with the error message. The banner persists until the next successful save (or you dismiss it manually).
 
 ### Under the hood
 - Two-phase fetch: a fast list query followed by parallel per-PR enrichment for `mergeStateStatus` / review decision / CI rollup. Up to 32 concurrent connections.
@@ -165,7 +171,7 @@ The bundle is ad-hoc code-signed. Recipients will see a Gatekeeper warning the f
 ## Architecture
 
 ```
-GitPilotApp.swift          SwiftUI app entry; menu bar surface + tab body
+GitPilotApp.swift          SwiftUI app entry; menu bar surface + Settings scene
 AppState.swift             Single owner of all UX policy: transitions, dedupe,
                            snooze, pin, auto-rebase, auto-merge, persistence
 PRMonitor.swift            Pure fetcher with a 30s poll loop; emits per-PR
@@ -178,10 +184,12 @@ WorktreeManager.swift      git fetch + worktree add/remove via async Process
                            continuations
 PersistedState.swift       JSON-on-disk schema + atomic debounced writes;
                            defensive decoder
+SettingsWindow.swift       Settings window (General / Notifications / Repos
+                           tabs) + MenuBarExtra-safe Settings opener
 TabContents.swift          Activity + Worktrees tabs
 PRRowView.swift            PR row + inline check list
 AuxViews.swift             Search bar, refresh button, pinned banner, auth
-                           banner, settings disclosure
+                           banner
 ViewHelpers.swift          Hover modifiers + button styles
 Log.swift                  Stderr logger; debug gated by GITPILOT_DEBUG
 ```

@@ -19,7 +19,7 @@ struct GitPilotApp: App {
             MenuContent(state: state)
                 .onAppear { terminationObserver.bind(to: state) }
         } label: {
-            MenuBarLabel(monitor: state.monitor)
+            MenuBarLabel(state: state)
         }
         .menuBarExtraStyle(.window)
         .commands {}
@@ -67,7 +67,13 @@ private final class TerminationObserver {
 /// need a glance. The base icon swaps to a checkmark / refresh / warning glyph
 /// when state warrants it, while always reading as a PR tool.
 private struct MenuBarLabel: View {
+    @ObservedObject var state: AppState
     @ObservedObject var monitor: PRMonitor
+
+    init(state: AppState) {
+        self.state = state
+        self.monitor = state.monitor
+    }
 
     var body: some View {
         HStack(spacing: 3) {
@@ -80,9 +86,23 @@ private struct MenuBarLabel: View {
         }
     }
 
+    /// PRs the badge/icon should consider. Mirrors the notification-scoping rules:
+    ///   - Snoozed PRs are excluded (their state is suppressed for the user).
+    ///   - When any PR is pinned, only pinned PRs count — pinned mode means
+    ///     "focus on these," and the badge shouldn't lie about what notifications
+    ///     are actually firing for.
+    private var consideredPRs: [PullRequest] {
+        let pinned = state.persistedState.pinned
+        return monitor.prs.filter { pr in
+            if state.isSnoozed(pr.id) { return false }
+            if !pinned.isEmpty && !pinned.contains(pr.id) { return false }
+            return true
+        }
+    }
+
     /// PRs that warrant a glance: anything you can act on or should know about.
     private var attentionCount: Int {
-        monitor.prs.filter {
+        consideredPRs.filter {
             $0.isReadyToMerge || $0.needsBranchUpdate || $0.isBlocked || $0.hasConflicts
         }.count
     }
@@ -90,16 +110,17 @@ private struct MenuBarLabel: View {
     /// Picks the most attention-worthy state. Priority: ready > behind > conflicts >
     /// blocked > default.
     private var iconName: String {
-        if monitor.prs.contains(where: { $0.isReadyToMerge }) {
+        let prs = consideredPRs
+        if prs.contains(where: { $0.isReadyToMerge }) {
             return "checkmark.seal.fill"
         }
-        if monitor.prs.contains(where: { $0.needsBranchUpdate }) {
+        if prs.contains(where: { $0.needsBranchUpdate }) {
             return "arrow.triangle.2.circlepath"
         }
-        if monitor.prs.contains(where: { $0.hasConflicts }) {
+        if prs.contains(where: { $0.hasConflicts }) {
             return "exclamationmark.triangle.fill"
         }
-        if monitor.prs.contains(where: { $0.isBlocked }) {
+        if prs.contains(where: { $0.isBlocked }) {
             return "lock.fill"
         }
         return "arrow.triangle.pull"

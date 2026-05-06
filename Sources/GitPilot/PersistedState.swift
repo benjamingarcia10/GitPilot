@@ -32,6 +32,11 @@ struct ActivityEvent: Codable, Equatable, Identifiable {
     let prId: String
     let prNumber: Int
     let prTitle: String
+    /// PR URL captured at record time so clicking an old activity row still
+    /// opens the PR even after it's left the live list (closed/merged/private).
+    /// Optional so events from older state files (which didn't store the URL)
+    /// keep decoding — synthesized Codable uses decodeIfPresent for Optional.
+    let prURL: URL?
     let kind: Kind
     let detail: String?  // optional extra context (e.g. error message on autoRebaseFailed)
 }

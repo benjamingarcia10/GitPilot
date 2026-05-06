@@ -22,6 +22,13 @@ final class PRMonitor: ObservableObject {
     /// a finished-and-returned task is "not cancelled" but also not running,
     /// so checking that alone would let `start()` no-op when it shouldn't.
     private var isRunning = false
+    /// Set when a refresh is requested while one is already in flight. After
+    /// the in-flight refresh completes, we fire one more refresh to honor it.
+    /// Solves the auto-rebase deadlock where `runAutoRebase` was awaiting
+    /// inside the enrichment loop and then calling `monitor.refresh()`, which
+    /// always hit the `isRefreshing` guard and no-op'd — leaving the user
+    /// waiting until the next poll tick to see post-rebase state.
+    private var pendingRefresh = false
 
     /// Called immediately before each refresh starts. AppState uses this to clear
     /// expired snoozes so the upcoming pass treats those PRs as fresh.
@@ -66,6 +73,20 @@ final class PRMonitor: ObservableObject {
         isRunning = false
     }
 
+    /// Schedules a refresh. If one is already in flight, sets a pending flag
+    /// that fires another refresh as soon as the current one finishes — the
+    /// only safe way to "refresh after this rebase" from inside the enrichment
+    /// loop, where `await refresh()` would deadlock against its own guard.
+    /// Idempotent: multiple requests during one refresh coalesce to a single
+    /// follow-up refresh.
+    func requestRefresh() {
+        if isRefreshing {
+            pendingRefresh = true
+            return
+        }
+        Task { await self.refresh() }
+    }
+
     /// Two-phase refresh:
     ///   1. Fetch the list and publish immediately so the UI shows rows right away.
     ///   2. Enrich each PR in parallel; apply each result as it arrives.
@@ -74,8 +95,21 @@ final class PRMonitor: ObservableObject {
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
-        defer { isRefreshing = false }
+        await performRefresh()
+        isRefreshing = false
+        // Honor any refresh request that came in while we were running. Fired
+        // as a Task so we don't recurse synchronously and so callers further
+        // up the stack get to unwind first. Coalesces — a pending flag means
+        // "one more refresh," not "one per requestRefresh() call."
+        if pendingRefresh {
+            pendingRefresh = false
+            Task { await self.refresh() }
+        }
+    }
 
+    /// Body of refresh — extracted so `refresh()` can wrap it with epilogue
+    /// logic that runs even when this returns early (auth error, cancellation).
+    private func performRefresh() async {
         willRefresh()
 
         let refreshStart = Date()

@@ -445,8 +445,10 @@ final class AppState: ObservableObject {
             }
             // Clear the flag now that the PR is gone from the open list.
             mutate { $0.autoMerge.remove(pr.id) }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await monitor.refresh()
+            // Same deadlock concern as auto-rebase — when this is called from
+            // handle(prUpdated:) we're inside the refresh chain, so an inline
+            // `await refresh()` would no-op against its own guard.
+            scheduleDelayedRefresh()
         } catch {
             let msg = error.localizedDescription.lowercased()
             if msg.contains("already merged") {
@@ -496,10 +498,11 @@ final class AppState: ObservableObject {
 
     /// Append an event and trim per ActivityRetention. Call from transition handlers
     /// and action handlers; never from the read path.
-    private func recordActivity(prId: String, prNumber: Int, prTitle: String, kind: ActivityEvent.Kind, detail: String? = nil) {
+    private func recordActivity(prId: String, prNumber: Int, prTitle: String, prURL: URL?, kind: ActivityEvent.Kind, detail: String? = nil) {
         let event = ActivityEvent(
             id: UUID(), timestamp: Date(),
             prId: prId, prNumber: prNumber, prTitle: prTitle,
+            prURL: prURL,
             kind: kind, detail: detail
         )
         mutate { s in
@@ -516,7 +519,7 @@ final class AppState: ObservableObject {
     }
 
     private func record(_ kind: ActivityEvent.Kind, pr: PullRequest, detail: String? = nil) {
-        recordActivity(prId: pr.id, prNumber: pr.number, prTitle: pr.title, kind: kind, detail: detail)
+        recordActivity(prId: pr.id, prNumber: pr.number, prTitle: pr.title, prURL: pr.url, kind: kind, detail: detail)
     }
 
     // MARK: - Reviewer PRs
@@ -903,8 +906,12 @@ final class AppState: ObservableObject {
         do {
             try await client.updateBranch(prNodeId: pr.nodeId, method: .rebase)
             record(.autoRebased, pr: pr)
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await monitor.refresh()
+            // Schedule a follow-up refresh in a detached Task so it runs after
+            // the current refresh chain unwinds — `await monitor.refresh()`
+            // here would deadlock against its own `isRefreshing` guard, since
+            // auto-rebase is invoked from inside the enrichment loop. The 2s
+            // delay gives GitHub time to recompute mergeStateStatus.
+            scheduleDelayedRefresh()
             Log.debug("auto-rebase \(pr.id) succeeded")
         } catch {
             Log.debug("auto-rebase \(pr.id) failed: \(error.localizedDescription)")
@@ -917,6 +924,21 @@ final class AppState: ObservableObject {
 
     // MARK: - User-initiated rebase
 
+    /// Fires a refresh ~2s from now via `monitor.requestRefresh()` so:
+    ///   - the call doesn't block the current refresh chain (no inline await),
+    ///   - the 2s gives GitHub time to recompute mergeStateStatus after the
+    ///     mutation we just sent,
+    ///   - if a refresh is in flight when the timer fires, it queues via the
+    ///     pendingRefresh flag instead of being dropped.
+    private func scheduleDelayedRefresh() {
+        // Task spawned from a @MainActor context inherits the actor, so the
+        // body already runs on @MainActor — no MainActor.run hop needed.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self?.monitor.requestRefresh()
+        }
+    }
+
     /// Manual rebase via the inline button or the notification action.
     func rebase(prId: String) async {
         guard !rebaseInFlight.contains(prId) else { return }
@@ -926,8 +948,11 @@ final class AppState: ObservableObject {
         do {
             try await client.updateBranch(prNodeId: pr.nodeId, method: .rebase)
             record(.rebased, pr: pr)
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await monitor.refresh()
+            // Same delayed-refresh pattern as auto-rebase: button taps usually
+            // run outside the refresh chain so a direct `await refresh()` would
+            // work, but coupling the two paths means there's only one race
+            // window to reason about and the sleep doesn't block button UX.
+            scheduleDelayedRefresh()
         } catch {
             // Surface the failure in activity so the user can see why nothing
             // happened — the inline button just snapping back to "Rebase" with

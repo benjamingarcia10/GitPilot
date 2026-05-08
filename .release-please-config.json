@@ -6,7 +6,7 @@
       "package-name": "GitPilot",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": false,
-      "release-as-draft": true,
+      "draft": true,
       "include-component-in-tag": false,
       "include-v-in-tag": true,
       "draft-pull-request": false,

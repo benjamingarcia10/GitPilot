@@ -1,0 +1,206 @@
+name: Release
+
+# Trigger when you publish a GitHub Release. The release's body becomes the
+# Sparkle update prompt's release-notes HTML, and its tag (e.g. v0.2.0)
+# becomes the version embedded in the bundle and appcast.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write  # needed to push the updated appcast.xml back to main
+
+# Serialize releases. Two concurrent runs would both checkout main, both prepend
+# their own <item> to appcast.xml, and whichever pushes second would either
+# fast-forward over the other's entry (silent loss) or fail the push entirely.
+# `cancel-in-progress: false` queues the second run instead of dropping it —
+# we want every release's appcast entry to land, just not in parallel.
+concurrency:
+  group: release-appcast-write
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, sign, and publish
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      # Fail closed if sparkle-tools.sh has no SHA256 entry for the pinned
+      # SPARKLE_VERSION. We never want CI to silently extract an unverified
+      # Sparkle tarball, even on a version bump where the hash hasn't been
+      # filled in yet — better to fail the workflow with a clear error.
+      SPARKLE_REQUIRE_SHA: "1"
+      # macos-14 is an arm64 runner; we only ship arm64 today (team is on
+      # Apple Silicon). One job-level env keeps build-app.sh's host/target
+      # arch sanity check happy and gives every step the same suffix for
+      # filename construction (.zip, asset URL, sign target).
+      TARGET_ARCH: arm64
+
+    steps:
+      - name: Checkout the released tag
+        # Build the exact commit the tag points at, not main's tip. If those
+        # diverge (release targeted at a non-main commit, or main races ahead
+        # between Publish-Release and this checkout), main-based builds would
+        # ship a v<TAG> bundle containing different code than the tag —
+        # silently wrong. The appcast-commit step below explicitly switches
+        # to main when it's time to write back.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Guard — public key must be committed
+        # Without scripts/sparkle-public-key.txt, the .app would ship without
+        # SUPublicEDKey set, disabling Sparkle's signature verification — which
+        # would let any spoofed appcast push a malicious update. Fail the build
+        # rather than silently producing an unverifiable release.
+        run: |
+          if [[ ! -s scripts/sparkle-public-key.txt ]]; then
+            echo "::error::scripts/sparkle-public-key.txt is missing or empty. Run scripts/sparkle-keys.sh locally and commit the public key before cutting a release."
+            exit 1
+          fi
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          # CFBundleVersion is monotonic — use the GitHub run number so it always
+          # increases across releases (Sparkle compares this to detect updates).
+          BUILD="${{ github.run_number }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build + package zip
+        # package.sh runs build-app.sh internally and then zips the bundle.
+        # Forward VERSION + BUILD so the bundle's Info.plist gets the tag's
+        # version, not build-app.sh's defaults (0.1.0/1) — otherwise the zip
+        # would be named v<TAG> but contain a 0.1.0 bundle, which Sparkle
+        # would then offer as "an update available" forever.
+        env:
+          VERSION: "${{ steps.version.outputs.version }}"
+          BUILD: "${{ steps.version.outputs.build }}"
+        run: ./scripts/package.sh "${{ steps.version.outputs.version }}"
+
+      - name: Sign update with Sparkle
+        id: sign
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          ZIP: "dist/GitPilot-${{ steps.version.outputs.version }}-${{ env.TARGET_ARCH }}.zip"
+        run: |
+          if [[ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]]; then
+            echo "::error::SPARKLE_ED_PRIVATE_KEY secret missing — run scripts/sparkle-keys.sh locally and add the printed key as a repo secret."
+            exit 1
+          fi
+          SPARKLE_DIR="$(./scripts/lib/sparkle-tools.sh)"
+          # sign_update reads the private key from stdin when given - as path.
+          SIG_LINE="$("$SPARKLE_DIR/bin/sign_update" --ed-key-file - "$ZIP" <<<"$SPARKLE_ED_PRIVATE_KEY")"
+          # Multi-line/quote-bearing values must be passed via env (and read
+          # from env in the consuming step) — never via direct ${{}} expansion
+          # in shell strings, which is shell-injection-vulnerable.
+          {
+            echo "signature_line<<EOF_SIG"
+            printf '%s\n' "$SIG_LINE"
+            echo "EOF_SIG"
+          } >> "$GITHUB_OUTPUT"
+          echo "length=$(stat -f%z "$ZIP")" >> "$GITHUB_OUTPUT"
+
+      - name: Render release notes (Markdown → HTML via GitHub API)
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Read the body from the event payload via jq rather than YAML
+          # interpolation. The release body can contain quotes, newlines, and
+          # YAML-significant characters — interpolating it directly into a
+          # `BODY: ${{ ... }}` field can break the workflow before the runner
+          # sees it.
+          EVENT_PATH: ${{ github.event_path }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: |
+          BODY="$(jq -r '.release.body // ""' "$EVENT_PATH")"
+          if [[ -n "$BODY" ]]; then
+            HTML="$(jq -nc --arg text "$BODY" --arg mode gfm '{text:$text, mode:$mode}' \
+                    | gh api -X POST /markdown --input -)"
+          else
+            HTML=""
+          fi
+          if [[ -z "$HTML" ]]; then
+            HTML="<p>See <a href=\"$RELEASE_URL\">release notes on GitHub</a>.</p>"
+          fi
+          {
+            echo "html<<EOF_NOTES_RENDERED"
+            printf '%s\n' "$HTML"
+            echo "EOF_NOTES_RENDERED"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update appcast.xml on main
+        env:
+          # Multi-line / quote-bearing values must NOT go into the shell command
+          # via ${{ }} expansion — pass via env and reference as "$VAR" inside
+          # the script. Quote each ${{ }} so any leading whitespace or
+          # YAML-significant characters in the substituted value can't disturb
+          # the env block's structure.
+          NOTES_HTML: "${{ steps.notes.outputs.html }}"
+          SIG_LINE: "${{ steps.sign.outputs.signature_line }}"
+          VERSION: "${{ steps.version.outputs.version }}"
+          BUILD: "${{ steps.version.outputs.build }}"
+          TAG: "${{ steps.version.outputs.tag }}"
+          LENGTH: "${{ steps.sign.outputs.length }}"
+          REPO: "${{ github.repository }}"
+        run: |
+          # Switch from the tag's detached HEAD to a fresh main checkout. The
+          # new entry must be prepended to *main's* current appcast.xml so
+          # any entries main has that the tag doesn't (from concurrent or
+          # newer releases) are preserved. dist/ + GitPilot.app are gitignored
+          # so the build outputs needed by the upload step survive the switch.
+          git fetch origin main
+          git checkout -B main origin/main
+
+          PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
+          # Filename must match what package.sh produced and what the upload
+          # step pushes to the release — package.sh names the zip
+          # GitPilot-<VERSION>-<ARCH>.zip, so the appcast's enclosure URL
+          # has to as well or Sparkle 404s.
+          DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/GitPilot-$VERSION-$TARGET_ARCH.zip"
+          ./scripts/lib/update-appcast.py \
+            --appcast appcast.xml \
+            --version "$BUILD" \
+            --short-version "$VERSION" \
+            --url "$DOWNLOAD_URL" \
+            --length "$LENGTH" \
+            --signature-line "$SIG_LINE" \
+            --pub-date "$PUB_DATE" \
+            --description "$NOTES_HTML"
+
+      - name: Upload zip + checksum to the GitHub Release
+        # Upload the zip BEFORE committing the appcast so the appcast never
+        # references a not-yet-uploaded asset. A user polling the appcast in
+        # the window between these two steps will see no new entry — benign.
+        # The reverse order would point users at a 404.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release upload "$TAG" \
+            "dist/GitPilot-$VERSION-$TARGET_ARCH.zip" \
+            "dist/GitPilot-$VERSION-$TARGET_ARCH.zip.sha256" \
+            --clobber
+
+      - name: Commit appcast.xml back to main
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          if git diff --cached --quiet; then
+            echo "No appcast change to commit"
+          else
+            git commit -m "release: appcast entry for $TAG"
+            git push origin HEAD:main
+          fi

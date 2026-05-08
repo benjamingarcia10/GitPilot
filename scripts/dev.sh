@@ -1,6 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Dev loop: watch Sources, rebuild bundle on change, relaunch app, tee stderr.
 # Ctrl+C exits cleanly.
+#
+# /bin/bash (universal) rather than /usr/bin/env bash because some user PATHs
+# lead with an Intel-only Homebrew bash, which would launch this script under
+# Rosetta and silently produce an x86_64 binary.
 
 set -euo pipefail
 

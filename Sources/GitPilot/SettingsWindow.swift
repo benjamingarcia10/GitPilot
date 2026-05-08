@@ -8,12 +8,13 @@ import AppKit
 /// for free. Tabs follow the native pattern (icon + title across the top).
 struct SettingsView: View {
     @ObservedObject var state: AppState
+    @ObservedObject var updateController: UpdateController
 
     /// Tab identity — drives the toolbar selection and lets us switch
     /// programmatically (e.g. footer "Settings…" button could deep-link to
     /// a tab in the future).
     enum Tab: Hashable {
-        case general, notifications, repos
+        case general, notifications, repos, updates
     }
 
     @State private var selection: Tab = .general
@@ -31,8 +32,31 @@ struct SettingsView: View {
             ReposSettingsTab(state: state)
                 .tabItem { Label("Repos", systemImage: "square.stack.3d.up") }
                 .tag(Tab.repos)
+
+            UpdatesSettingsTab(controller: updateController)
+                .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+                .tag(Tab.updates)
         }
         .frame(width: 520, height: 540)
+    }
+}
+
+// MARK: - Updates
+
+private struct UpdatesSettingsTab: View {
+    @ObservedObject var controller: UpdateController
+
+    var body: some View {
+        Form {
+            Section {
+                UpdatesSettingsSection(controller: controller)
+            } footer: {
+                Text("GitPilot checks GitHub Releases for new versions. Updates are signed with an EdDSA key and verified before install.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

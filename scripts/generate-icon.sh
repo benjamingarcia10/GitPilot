@@ -1,6 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Generates AppIcon.icns from a single 1024x1024 PNG.
 # Uses macOS built-ins: sips for resizing, iconutil for icns packaging.
+#
+# /bin/bash for shebang consistency with the rest of the build scripts.
 
 set -euo pipefail
 
@@ -12,7 +14,7 @@ ICONSET="$ROOT/AppIcon.iconset"
 ICNS="$ROOT/AppIcon.icns"
 
 echo "==> Rendering base PNG"
-swift "$ROOT/scripts/render-icon.swift" "$BASE_PNG"
+swift "$ROOT/scripts/lib/render-icon.swift" "$BASE_PNG"
 
 echo "==> Building iconset"
 rm -rf "$ICONSET"

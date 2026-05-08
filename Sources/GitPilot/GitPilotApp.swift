@@ -6,6 +6,7 @@ import AppKit
 @main
 struct GitPilotApp: App {
     @StateObject private var state = AppState()
+    @StateObject private var updateController = UpdateController()
     private let terminationObserver: TerminationObserver
 
     init() {
@@ -27,7 +28,7 @@ struct GitPilotApp: App {
         // Native Settings window — bound to Cmd+, by SwiftUI. Opened
         // programmatically from the popover footer via `SettingsWindowOpener`.
         Settings {
-            SettingsView(state: state)
+            SettingsView(state: state, updateController: updateController)
         }
     }
 }

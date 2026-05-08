@@ -6,53 +6,69 @@
     <description>Most recent GitPilot updates</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.1</title>
+      <pubDate>Fri, 08 May 2026 23:59:44 +0000</pubDate>
+      <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.0...v0.1.1">0.1.1</a> (2026-05-08)</h2>
+<h3>Bug Fixes</h3>
+<ul>
+<li>detect arm64 hardware via sysctl, not uname -m (<a href="https://github.com/benjamingarcia10/GitPilot/commit/4fe360299ab24d8039f54bb9fd6ff2e2ac52c7af">4fe3602</a>)</li>
+<li>hide CFBundleVersion from Settings, expose on hover (<a href="https://github.com/benjamingarcia10/GitPilot/commit/a6e3b6490323990c74c3ed7838994349a444ad6b">a6e3b64</a>)</li>
+<li>release.yml parse error blocked release event from firing (<a href="https://github.com/benjamingarcia10/GitPilot/commit/50f268ac664671026ec964b8a8968028011fa10f">50f268a</a>)</li>
+<li>Settings footer text now spans full section width (<a href="https://github.com/benjamingarcia10/GitPilot/commit/4ef5abaa4c4d5b7c7f107883d800ad0e882ec203">4ef5aba</a>)</li>
+</ul>]]></description>
+      <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.1/GitPilot-0.1.1-arm64.zip" length="2165384" type="application/octet-stream" sparkle:edSignature="3NYPEu1pMxKWnBzarRO2782wqWeHyC+SXNwbuZh5ZtEddHVLSbNBcn9JUwA6tiKhtZGy6w5fulnvN5wj1veYBQ==" />
+    </item>
+    <item>
       <title>Version 0.1.0</title>
       <pubDate>Fri, 08 May 2026 22:13:34 +0000</pubDate>
       <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
       <sparkle:version>6</sparkle:version>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h2>GitPilot v0.1.0</h2>
-<p>The first release. A macOS menu bar app that watches your GitHub PRs and pings you the moment one needs attention — behind the base branch, ready to merge, or blocked by failing CI. Click the notification's <strong>Rebase</strong> button and GitPilot calls GitHub's <code class="notranslate">updatePullRequestBranch</code> GraphQL mutation directly. Same effect as picking <em>"Update with rebase"</em> from the dropdown on the PR page, without leaving your current task.</p>
-<h3>Install</h3>
-<p>Apple Silicon Mac on macOS 13 or later:</p>
-<div class="highlight highlight-source-shell"><pre class="notranslate">curl -fsSL https://raw.githubusercontent.com/benjamingarcia10/GitPilot/main/scripts/install.sh <span class="pl-k">|</span> bash</pre></div>
-<p>The installer downloads the signed zip, verifies the SHA-256, installs to <code class="notranslate">/Applications</code>, and launches the app. No Gatekeeper "Open Anyway" detour — <code class="notranslate">curl</code>-downloaded files don't carry the quarantine attribute that browser downloads do.</p>
-<p>After install: allow notification permission on first launch, then <code class="notranslate">brew install gh &amp;&amp; gh auth login</code>.</p>
-<h3>Highlights</h3>
-<ul>
-<li><strong>Menu bar surface</strong> — status glyph swaps between <em>checkmark</em> (ready), <em>circular arrows</em> (behind), <em>triangle</em> (conflicts), <em>lock</em> (blocked), and the default PR glyph. Attention-count badge shows how many PRs are actionable.</li>
-<li><strong>Four tabs</strong> — My PRs · Reviewing · Activity · Worktrees. Reviewer pills show <em>why</em> you're on the list (<code class="notranslate">you</code> or <code class="notranslate">@team-slug</code>).</li>
-<li><strong>One-click rebase</strong> — Notification's <em>Rebase</em> button calls <code class="notranslate">updatePullRequestBranch</code> directly, no PR page detour.</li>
-<li><strong>Auto-rebase</strong> and <strong>auto-merge</strong> per PR — opt in where you want it, manual control everywhere else. Auto-merge falls back to client-side merging when the repo doesn't allow GitHub-native auto-merge.</li>
-<li><strong>Edge-triggered notifications</strong> — one fire per state transition, deduped across app restarts. Ten event types, all toggleable in Settings.</li>
-<li><strong>Pin / snooze</strong> — pin to focus only on those PRs (notifications scope to the pinned set); snooze for 30m / 2h / until tomorrow 9am.</li>
-<li><strong>Worktree manager</strong> — create per-PR worktrees under <code class="notranslate">~/worktrees/gitpilot</code>, open in your editor, remove when done. Refuses to nuke dirty worktrees without confirmation.</li>
-<li><strong>Inline check list</strong> — every CI check or status context with deep links (Buildkite, GitHub Actions, CircleCI, etc.).</li>
-<li><strong>Search bar</strong> with regex toggle, repo filter, and 5 sort orders. All persisted across launches.</li>
-<li><strong>Activity log</strong> — chronological view of every state transition, action you took, and failure (capped at 200 entries / 7 days). Selectable for copy, full text on hover.</li>
-<li><strong>Auto-update via Sparkle</strong> — every release after this one installs in-app, ed25519-signature-verified.</li>
-</ul>
-<h3>Settings</h3>
-<p>Open with <strong>⌘,</strong>. Four tabs:</p>
-<ul>
-<li><strong>General</strong> — poll interval (10s–5m), sort order, worktree root, editor (auto-detects Cursor → VSCode → Sublime).</li>
-<li><strong>Notifications</strong> — every notification toggle and a <em>Send test notification</em> button.</li>
-<li><strong>Repos</strong> — per-repo auto-merge method overrides (Squash / Merge / Rebase).</li>
-<li><strong>Updates</strong> — manual <em>Check for Updates…</em> button, last-checked timestamp, auto-check toggle.</li>
-</ul>
-<h3>Requirements</h3>
-<ul>
-<li>macOS 13 (Ventura) or later</li>
-<li>Apple Silicon (arm64) — Intel builds aren't shipped today</li>
-<li><a href="https://cli.github.com/"><code class="notranslate">gh</code></a> authenticated: <code class="notranslate">gh auth login</code></li>
-</ul>
-<h3>Notes</h3>
-<ul>
-<li><strong>Ad-hoc code-signed</strong> (no paid Apple Developer ID). The <code class="notranslate">curl | bash</code> installer is the friction-free path. If you install manually from the zip below, macOS will block the first launch with <em>"Apple cannot check it for malicious software"</em> — open System Settings → Privacy &amp; Security and click <strong>Open Anyway</strong>. Only the first launch is affected.</li>
-<li><strong>No telemetry.</strong> All state lives at <code class="notranslate">~/Library/Application Support/GitPilot/state.json</code>.</li>
-<li><strong>GitHub auth via the <code class="notranslate">gh</code> CLI.</strong> Tokens never leave your machine; the app reads them from <code class="notranslate">gh auth token</code> on demand.</li>
-</ul>
-<p>See the <a href="https://github.com/benjamingarcia10/GitPilot#readme">README</a> for the full feature inventory and architecture notes.</p>]]></description>
+      <description>&lt;h2&gt;GitPilot v0.1.0&lt;/h2&gt;
+&lt;p&gt;The first release. A macOS menu bar app that watches your GitHub PRs and pings you the moment one needs attention — behind the base branch, ready to merge, or blocked by failing CI. Click the notification's &lt;strong&gt;Rebase&lt;/strong&gt; button and GitPilot calls GitHub's &lt;code class="notranslate"&gt;updatePullRequestBranch&lt;/code&gt; GraphQL mutation directly. Same effect as picking &lt;em&gt;"Update with rebase"&lt;/em&gt; from the dropdown on the PR page, without leaving your current task.&lt;/p&gt;
+&lt;h3&gt;Install&lt;/h3&gt;
+&lt;p&gt;Apple Silicon Mac on macOS 13 or later:&lt;/p&gt;
+&lt;div class="highlight highlight-source-shell"&gt;&lt;pre class="notranslate"&gt;curl -fsSL https://raw.githubusercontent.com/benjamingarcia10/GitPilot/main/scripts/install.sh &lt;span class="pl-k"&gt;|&lt;/span&gt; bash&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The installer downloads the signed zip, verifies the SHA-256, installs to &lt;code class="notranslate"&gt;/Applications&lt;/code&gt;, and launches the app. No Gatekeeper "Open Anyway" detour — &lt;code class="notranslate"&gt;curl&lt;/code&gt;-downloaded files don't carry the quarantine attribute that browser downloads do.&lt;/p&gt;
+&lt;p&gt;After install: allow notification permission on first launch, then &lt;code class="notranslate"&gt;brew install gh &amp;amp;&amp;amp; gh auth login&lt;/code&gt;.&lt;/p&gt;
+&lt;h3&gt;Highlights&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Menu bar surface&lt;/strong&gt; — status glyph swaps between &lt;em&gt;checkmark&lt;/em&gt; (ready), &lt;em&gt;circular arrows&lt;/em&gt; (behind), &lt;em&gt;triangle&lt;/em&gt; (conflicts), &lt;em&gt;lock&lt;/em&gt; (blocked), and the default PR glyph. Attention-count badge shows how many PRs are actionable.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Four tabs&lt;/strong&gt; — My PRs · Reviewing · Activity · Worktrees. Reviewer pills show &lt;em&gt;why&lt;/em&gt; you're on the list (&lt;code class="notranslate"&gt;you&lt;/code&gt; or &lt;code class="notranslate"&gt;@team-slug&lt;/code&gt;).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;One-click rebase&lt;/strong&gt; — Notification's &lt;em&gt;Rebase&lt;/em&gt; button calls &lt;code class="notranslate"&gt;updatePullRequestBranch&lt;/code&gt; directly, no PR page detour.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Auto-rebase&lt;/strong&gt; and &lt;strong&gt;auto-merge&lt;/strong&gt; per PR — opt in where you want it, manual control everywhere else. Auto-merge falls back to client-side merging when the repo doesn't allow GitHub-native auto-merge.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Edge-triggered notifications&lt;/strong&gt; — one fire per state transition, deduped across app restarts. Ten event types, all toggleable in Settings.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Pin / snooze&lt;/strong&gt; — pin to focus only on those PRs (notifications scope to the pinned set); snooze for 30m / 2h / until tomorrow 9am.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Worktree manager&lt;/strong&gt; — create per-PR worktrees under &lt;code class="notranslate"&gt;~/worktrees/gitpilot&lt;/code&gt;, open in your editor, remove when done. Refuses to nuke dirty worktrees without confirmation.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Inline check list&lt;/strong&gt; — every CI check or status context with deep links (Buildkite, GitHub Actions, CircleCI, etc.).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Search bar&lt;/strong&gt; with regex toggle, repo filter, and 5 sort orders. All persisted across launches.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Activity log&lt;/strong&gt; — chronological view of every state transition, action you took, and failure (capped at 200 entries / 7 days). Selectable for copy, full text on hover.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Auto-update via Sparkle&lt;/strong&gt; — every release after this one installs in-app, ed25519-signature-verified.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;Settings&lt;/h3&gt;
+&lt;p&gt;Open with &lt;strong&gt;⌘,&lt;/strong&gt;. Four tabs:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;General&lt;/strong&gt; — poll interval (10s–5m), sort order, worktree root, editor (auto-detects Cursor → VSCode → Sublime).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Notifications&lt;/strong&gt; — every notification toggle and a &lt;em&gt;Send test notification&lt;/em&gt; button.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Repos&lt;/strong&gt; — per-repo auto-merge method overrides (Squash / Merge / Rebase).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Updates&lt;/strong&gt; — manual &lt;em&gt;Check for Updates…&lt;/em&gt; button, last-checked timestamp, auto-check toggle.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;Requirements&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;macOS 13 (Ventura) or later&lt;/li&gt;
+&lt;li&gt;Apple Silicon (arm64) — Intel builds aren't shipped today&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://cli.github.com/"&gt;&lt;code class="notranslate"&gt;gh&lt;/code&gt;&lt;/a&gt; authenticated: &lt;code class="notranslate"&gt;gh auth login&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;Notes&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Ad-hoc code-signed&lt;/strong&gt; (no paid Apple Developer ID). The &lt;code class="notranslate"&gt;curl | bash&lt;/code&gt; installer is the friction-free path. If you install manually from the zip below, macOS will block the first launch with &lt;em&gt;"Apple cannot check it for malicious software"&lt;/em&gt; — open System Settings → Privacy &amp;amp; Security and click &lt;strong&gt;Open Anyway&lt;/strong&gt;. Only the first launch is affected.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;No telemetry.&lt;/strong&gt; All state lives at &lt;code class="notranslate"&gt;~/Library/Application Support/GitPilot/state.json&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;GitHub auth via the &lt;code class="notranslate"&gt;gh&lt;/code&gt; CLI.&lt;/strong&gt; Tokens never leave your machine; the app reads them from &lt;code class="notranslate"&gt;gh auth token&lt;/code&gt; on demand.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;See the &lt;a href="https://github.com/benjamingarcia10/GitPilot#readme"&gt;README&lt;/a&gt; for the full feature inventory and architecture notes.&lt;/p&gt;</description>
       <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.0/GitPilot-0.1.0-arm64.zip" length="2162930" type="application/octet-stream" sparkle:edSignature="6igeN52BIyOUcbJCpx5hBulMmjQgmP3VCgDi+9H5gYOIYKqsWHgpLwzpRfjamNdCZJJFoOEv8/IAAOhIRPGnCg==" />
     </item>
   </channel>

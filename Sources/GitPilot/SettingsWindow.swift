@@ -51,9 +51,14 @@ private struct UpdatesSettingsTab: View {
             Section {
                 UpdatesSettingsSection(controller: controller)
             } footer: {
+                // .frame(maxWidth: .infinity, alignment: .leading) forces the
+                // footer to fill the section's content width — without it, the
+                // Text lays out at its natural (narrow) width and floats in
+                // the middle of the section, which looks accidental.
                 Text("GitPilot checks GitHub Releases for new versions. Updates are signed with an EdDSA key and verified before install.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .formStyle(.grouped)
@@ -122,6 +127,7 @@ private struct GeneralSettingsTab: View {
                 Text("\"Auto\" prefers Cursor, then VSCode, then Sublime — falling back to Finder.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .formStyle(.grouped)
@@ -203,6 +209,7 @@ private struct NotificationsSettingsTab: View {
                 Text("Posts a sample notification of each enabled type so you can confirm they reach Notification Center.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .formStyle(.grouped)
@@ -251,6 +258,7 @@ private struct ReposSettingsTab: View {
                 Text("\"Default\" picks the highest-priority method allowed by the repo (Squash > Merge > Rebase). Override per repo when the default isn't what you want.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .formStyle(.grouped)

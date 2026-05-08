@@ -1,0 +1,25 @@
+name: release-please
+
+# Manages release PRs and cuts draft GitHub Releases. Each push to main with
+# Conventional-Commit prefixes (feat/fix/chore/etc.) updates a perpetually-open
+# "chore(main): release vX.Y.Z" PR whose body is the auto-generated changelog.
+# Merging that PR creates a *draft* release (per release-as-draft: true in
+# .release-please-config.json); clicking Publish in the GitHub UI fires
+# release.yml, which builds and signs the actual artifact.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write          # tag + create the draft release
+  pull-requests: write     # open / update the release PR
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json

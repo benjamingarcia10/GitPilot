@@ -108,7 +108,12 @@ struct UpdatesSettingsSection: View {
             HStack {
                 Text("Version").foregroundStyle(.secondary)
                 Spacer()
-                Text(versionString).monospacedDigit()
+                // Show only the human-readable SemVer; CFBundleVersion is
+                // debug-noise for end users. Surface it on hover for the
+                // occasional "what build are you on?" diagnostic.
+                Text(shortVersion)
+                    .monospacedDigit()
+                    .help("Build \(buildNumber)")
             }
 
             Toggle("Check for updates automatically", isOn: $controller.automaticallyChecksForUpdates)
@@ -128,11 +133,12 @@ struct UpdatesSettingsSection: View {
         }
     }
 
-    private var versionString: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "\(short) (\(build))"
+    private var shortVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
+    private var buildNumber: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
     }
 
     private func relativeString(_ date: Date) -> String {

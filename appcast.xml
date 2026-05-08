@@ -1,9 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>GitPilot</title>
     <link>https://github.com/benjamingarcia10/GitPilot</link>
     <description>Most recent GitPilot updates</description>
     <language>en</language>
+    <item>
+      <title>Version 0.1.0</title>
+      <pubDate>Fri, 08 May 2026 22:13:34 +0000</pubDate>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2>GitPilot v0.1.0</h2>
+<p>The first release. A macOS menu bar app that watches your GitHub PRs and pings you the moment one needs attention — behind the base branch, ready to merge, or blocked by failing CI. Click the notification's <strong>Rebase</strong> button and GitPilot calls GitHub's <code class="notranslate">updatePullRequestBranch</code> GraphQL mutation directly. Same effect as picking <em>"Update with rebase"</em> from the dropdown on the PR page, without leaving your current task.</p>
+<h3>Install</h3>
+<p>Apple Silicon Mac on macOS 13 or later:</p>
+<div class="highlight highlight-source-shell"><pre class="notranslate">curl -fsSL https://raw.githubusercontent.com/benjamingarcia10/GitPilot/main/scripts/install.sh <span class="pl-k">|</span> bash</pre></div>
+<p>The installer downloads the signed zip, verifies the SHA-256, installs to <code class="notranslate">/Applications</code>, and launches the app. No Gatekeeper "Open Anyway" detour — <code class="notranslate">curl</code>-downloaded files don't carry the quarantine attribute that browser downloads do.</p>
+<p>After install: allow notification permission on first launch, then <code class="notranslate">brew install gh &amp;&amp; gh auth login</code>.</p>
+<h3>Highlights</h3>
+<ul>
+<li><strong>Menu bar surface</strong> — status glyph swaps between <em>checkmark</em> (ready), <em>circular arrows</em> (behind), <em>triangle</em> (conflicts), <em>lock</em> (blocked), and the default PR glyph. Attention-count badge shows how many PRs are actionable.</li>
+<li><strong>Four tabs</strong> — My PRs · Reviewing · Activity · Worktrees. Reviewer pills show <em>why</em> you're on the list (<code class="notranslate">you</code> or <code class="notranslate">@team-slug</code>).</li>
+<li><strong>One-click rebase</strong> — Notification's <em>Rebase</em> button calls <code class="notranslate">updatePullRequestBranch</code> directly, no PR page detour.</li>
+<li><strong>Auto-rebase</strong> and <strong>auto-merge</strong> per PR — opt in where you want it, manual control everywhere else. Auto-merge falls back to client-side merging when the repo doesn't allow GitHub-native auto-merge.</li>
+<li><strong>Edge-triggered notifications</strong> — one fire per state transition, deduped across app restarts. Ten event types, all toggleable in Settings.</li>
+<li><strong>Pin / snooze</strong> — pin to focus only on those PRs (notifications scope to the pinned set); snooze for 30m / 2h / until tomorrow 9am.</li>
+<li><strong>Worktree manager</strong> — create per-PR worktrees under <code class="notranslate">~/worktrees/gitpilot</code>, open in your editor, remove when done. Refuses to nuke dirty worktrees without confirmation.</li>
+<li><strong>Inline check list</strong> — every CI check or status context with deep links (Buildkite, GitHub Actions, CircleCI, etc.).</li>
+<li><strong>Search bar</strong> with regex toggle, repo filter, and 5 sort orders. All persisted across launches.</li>
+<li><strong>Activity log</strong> — chronological view of every state transition, action you took, and failure (capped at 200 entries / 7 days). Selectable for copy, full text on hover.</li>
+<li><strong>Auto-update via Sparkle</strong> — every release after this one installs in-app, ed25519-signature-verified.</li>
+</ul>
+<h3>Settings</h3>
+<p>Open with <strong>⌘,</strong>. Four tabs:</p>
+<ul>
+<li><strong>General</strong> — poll interval (10s–5m), sort order, worktree root, editor (auto-detects Cursor → VSCode → Sublime).</li>
+<li><strong>Notifications</strong> — every notification toggle and a <em>Send test notification</em> button.</li>
+<li><strong>Repos</strong> — per-repo auto-merge method overrides (Squash / Merge / Rebase).</li>
+<li><strong>Updates</strong> — manual <em>Check for Updates…</em> button, last-checked timestamp, auto-check toggle.</li>
+</ul>
+<h3>Requirements</h3>
+<ul>
+<li>macOS 13 (Ventura) or later</li>
+<li>Apple Silicon (arm64) — Intel builds aren't shipped today</li>
+<li><a href="https://cli.github.com/"><code class="notranslate">gh</code></a> authenticated: <code class="notranslate">gh auth login</code></li>
+</ul>
+<h3>Notes</h3>
+<ul>
+<li><strong>Ad-hoc code-signed</strong> (no paid Apple Developer ID). The <code class="notranslate">curl | bash</code> installer is the friction-free path. If you install manually from the zip below, macOS will block the first launch with <em>"Apple cannot check it for malicious software"</em> — open System Settings → Privacy &amp; Security and click <strong>Open Anyway</strong>. Only the first launch is affected.</li>
+<li><strong>No telemetry.</strong> All state lives at <code class="notranslate">~/Library/Application Support/GitPilot/state.json</code>.</li>
+<li><strong>GitHub auth via the <code class="notranslate">gh</code> CLI.</strong> Tokens never leave your machine; the app reads them from <code class="notranslate">gh auth token</code> on demand.</li>
+</ul>
+<p>See the <a href="https://github.com/benjamingarcia10/GitPilot#readme">README</a> for the full feature inventory and architecture notes.</p>]]></description>
+      <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.0/GitPilot-0.1.0-arm64.zip" length="2162930" type="application/octet-stream" sparkle:edSignature="6igeN52BIyOUcbJCpx5hBulMmjQgmP3VCgDi+9H5gYOIYKqsWHgpLwzpRfjamNdCZJJFoOEv8/IAAOhIRPGnCg==" />
+    </item>
   </channel>
 </rss>

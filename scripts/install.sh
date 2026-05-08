@@ -41,8 +41,13 @@ log()  { printf '%s\n' "${BOLD}==>${RESET} $*"; }
 
 [[ "$(uname)" == "Darwin" ]] || err "GitPilot is macOS-only (detected: $(uname))."
 
-ARCH="$(uname -m)"
-[[ "$ARCH" == "arm64" ]] || err "GitPilot only ships arm64 builds (detected: $ARCH)."
+# Check hardware capability, not `uname -m`. uname reports the *process* arch,
+# so an x86_64 bash (Rosetta-translated, or an Intel-prefix Homebrew bash
+# earlier in PATH) reports x86_64 even on Apple Silicon — and the installer
+# would falsely reject a Mac that can run the binary just fine.
+if [[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]]; then
+    err "GitPilot only ships arm64 builds — this Mac is Intel."
+fi
 
 OS_VERSION="$(sw_vers -productVersion)"
 OS_MAJOR="${OS_VERSION%%.*}"

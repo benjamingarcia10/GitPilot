@@ -3,9 +3,16 @@ name: release-please
 # Manages release PRs and cuts draft GitHub Releases. Each push to main with
 # Conventional-Commit prefixes (feat/fix/chore/etc.) updates a perpetually-open
 # "chore(main): release vX.Y.Z" PR whose body is the auto-generated changelog.
-# Merging that PR creates a *draft* release (per release-as-draft: true in
+# Merging that PR creates a *draft* release (per `draft: true` in
 # .release-please-config.json); clicking Publish in the GitHub UI fires
 # release.yml, which builds and signs the actual artifact.
+#
+# Why a PAT instead of GITHUB_TOKEN: GitHub deliberately suppresses workflow
+# runs from events created by the default GITHUB_TOKEN (anti-loop guard). If
+# release-please used GITHUB_TOKEN to publish the draft, the resulting
+# `release: published` event would fire but no downstream workflow would run.
+# RELEASE_PLEASE_TOKEN is a PAT with repo + workflow scopes; events it creates
+# are treated as user events and properly trigger release.yml.
 
 on:
   push:
@@ -21,5 +28,6 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json

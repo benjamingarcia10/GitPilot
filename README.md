@@ -4,6 +4,20 @@ A macOS menu bar app that watches your GitHub PRs and pings you the moment one n
 
 The merge button stays in your hands by default. Opt in to auto-merge per PR if you want it.
 
+## Install
+
+Apple Silicon Mac on macOS 13+:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/benjamingarcia10/GitPilot/main/scripts/install.sh | bash
+```
+
+Verifies the SHA-256 against the published release, installs to `/Applications`, launches the app. No Gatekeeper "Open Anyway" detour. Future updates install in-app via Sparkle.
+
+After install: allow notification permission on first launch, then `brew install gh && gh auth login`.
+
+[Inspect the script first](scripts/install.sh) if you'd rather not pipe to bash blind. See [Distribute → First install](#first-install-teammate) for the manual zip path.
+
 ## Features
 
 ### Menu bar surface
@@ -84,11 +98,12 @@ The "—" rows are intentionally silent: they're either successes (which would b
 
 ### Settings reference
 
-Open the Settings window with **⌘,** or by clicking the gear icon in the popover footer. Settings are organized into three tabs:
+Open the Settings window with **⌘,** or by clicking the gear icon in the popover footer. Settings are organized into four tabs:
 
 - **General** — poll interval, sort order, worktree root, editor
 - **Notifications** — every notification toggle and the "Send test notification" button
 - **Repos** — per-repo auto-merge method overrides
+- **Updates** — Sparkle auto-update toggle, current version, manual "Check for Updates…" button
 
 All settings persist atomically to disk and survive restarts.
 
@@ -161,12 +176,95 @@ Action buttons on notifications require a code-signed bundle, so `swift run` is 
 
 ## Distribute
 
+GitPilot ships via [Sparkle](https://sparkle-project.org/) — first install is manual, but every update after that is in-app and frictionless.
+
+### Build target
+
+Builds are **arm64-only** (Apple Silicon). The team is exclusively on M-series Macs, and macOS Tahoe (26.x) has tightened Rosetta defaults — shipping an x86_64 zip would be flaky. Release artifacts are tagged with the architecture in the filename (`GitPilot-<version>-arm64.zip`) so a cross-arch mismatch surfaces before install. To experiment with another arch, set `TARGET_ARCH=x86_64` (or `universal` once that's plumbed through `lipo`) when invoking `scripts/build-app.sh`.
+
+### One-time setup (maintainer)
+
+Run **once for the project, by the original maintainer only**, to generate the EdDSA key pair Sparkle uses to sign updates:
+
 ```bash
-./scripts/package.sh           # writes dist/GitPilot-<version>.zip + .sha256
-./scripts/package.sh 0.2.0     # override version
+./scripts/sparkle-keys.sh
 ```
 
-The bundle is ad-hoc code-signed. Recipients will see a Gatekeeper warning the first time they open it; right-click → Open clears it. To skip that, sign with a Developer ID Application cert and notarize via `xcrun notarytool submit`.
+This:
+- Stores the private key in your macOS Keychain (machine-scoped — re-running it on a different Mac generates a *new* keypair, which would invalidate every signature on previously shipped releases. Don't.)
+- Writes the public key to `scripts/sparkle-public-key.txt` (commit this — public keys are public)
+- Prints a base64 private key to add to GitHub Actions as the `SPARKLE_ED_PRIVATE_KEY` repo secret (Settings → Secrets and variables → Actions)
+
+If you're a collaborator joining an already-set-up project, you do **not** run this — the public key is already committed and the GitHub Actions secret is already in place.
+
+### Cutting a release
+
+1. Make sure `main` has the changes you want to ship.
+2. Go to GitHub → Releases → **Draft a new release**.
+3. Pick a new tag (e.g. `v0.2.0`) and write the release notes in the description. The version embedded in the bundle is derived from the tag (with the `v` stripped); `CFBundleVersion` (the monotonic build number Sparkle uses to detect updates) is set from the GitHub Actions run number.
+4. **Publish release** — `.github/workflows/release.yml` fires, builds the bundle, signs the zip, updates `appcast.xml`, uploads the zip to the release, and commits the appcast back to `main`.
+
+That's it. Anyone running an older GitPilot will see the update prompt within 24 hours (or immediately if they hit "Check for Updates…" in Settings → Updates).
+
+### First install (teammate)
+
+One-liner — downloads the latest release, verifies the checksum, installs to `/Applications`, and launches:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/benjamingarcia10/GitPilot/main/scripts/install.sh | bash
+```
+
+Prefer to read the script before running it (recommended for any `curl | bash`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/benjamingarcia10/GitPilot/main/scripts/install.sh -o gitpilot-install.sh
+less gitpilot-install.sh
+bash gitpilot-install.sh
+```
+
+There's no Gatekeeper "Open Anyway" detour because `curl`-downloaded files don't carry the `com.apple.quarantine` xattr that Safari/AirDrop/iMessage downloads do. The installer strips xattrs defensively anyway. After install, every future release installs in-app via Sparkle — this one-liner is one-time per machine.
+
+After first launch, allow notification permission and:
+
+```bash
+brew install gh && gh auth login
+```
+
+#### Manual install (alternative)
+
+If you'd rather skip the script:
+
+1. Download the latest `.zip` from the [Releases page](https://github.com/benjamingarcia10/GitPilot/releases).
+2. Unzip → drag `GitPilot.app` to `/Applications`.
+3. Because Safari adds `com.apple.quarantine` to the download, double-click shows: *"GitPilot cannot be opened because Apple cannot check it for malicious software."* Click Done.
+4. Open **System Settings → Privacy & Security**, scroll to the bottom, click **"Open Anyway"** next to GitPilot, confirm.
+5. Done. Sparkle takes over and every future release installs in-app with no Gatekeeper prompts.
+
+The Gatekeeper dance is the cost of skipping a paid Apple Developer ID. Only the *first* launch is affected — subsequent launches and Sparkle's update flow both bypass it because Sparkle strips the quarantine xattr from update downloads.
+
+### Local rehearsal
+
+One command rehearses the full update flow end-to-end:
+
+```bash
+./scripts/test-update.sh                # 0.1.0 → 0.2.0 on port 8765
+./scripts/test-update.sh 0.1.0 0.5.0    # custom versions
+```
+
+This builds an "installed" copy at the old version, generates a signed release at the new version, runs an HTTP server in the repo root, points a `/tmp/GitPilot-test.app` copy at the local appcast, and launches it. Click *Settings (⌘,) → Updates → Check for Updates…* in the test app and you should see the Sparkle prompt. Press **Ctrl+C** in the terminal to tear everything down (kills the HTTP server, restores `appcast.xml`, removes the override and the test bundle).
+
+If you only want one phase rather than the whole rehearsal, the building blocks are exposed too:
+- `./scripts/build-app.sh` — produce a signed `.app` bundle in `./GitPilot.app`
+- `./scripts/package.sh 0.2.0` — same, then zip it into `dist/`
+
+### Manual zip-only distribution
+
+For sending a zip to a single coworker without involving Sparkle:
+
+```bash
+./scripts/package.sh           # writes dist/GitPilot-<version>-arm64.zip + .sha256
+./scripts/package.sh 0.2.0     # override version
+```
 
 ## Architecture
 
@@ -184,8 +282,10 @@ WorktreeManager.swift      git fetch + worktree add/remove via async Process
                            continuations
 PersistedState.swift       JSON-on-disk schema + atomic debounced writes;
                            defensive decoder
-SettingsWindow.swift       Settings window (General / Notifications / Repos
-                           tabs) + MenuBarExtra-safe Settings opener
+SettingsWindow.swift       Settings window (General / Notifications / Repos /
+                           Updates tabs) + MenuBarExtra-safe Settings opener
+UpdateController.swift     Sparkle wrapper: SPUStandardUpdaterController +
+                           delegate proxy that refreshes "last checked"
 TabContents.swift          Activity + Worktrees tabs
 PRRowView.swift            PR row + inline check list
 AuxViews.swift             Search bar, refresh button, pinned banner, auth

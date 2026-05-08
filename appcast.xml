@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>GitPilot</title>
+    <link>https://github.com/benjamingarcia10/GitPilot</link>
+    <description>Most recent GitPilot updates</description>
+    <language>en</language>
+  </channel>
+</rss>

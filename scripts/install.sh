@@ -142,6 +142,40 @@ ditto "$TMP_DIR/$APP_NAME.app" "$APP_PATH"
 log "Clearing quarantine attributes"
 xattr -cr "$APP_PATH" 2>/dev/null || true
 
+# --- gh CLI status ---
+#
+# GitPilot reads its GitHub token via `gh auth token`, so the app shows a
+# reauth banner if gh is missing or not logged in. Surface that here so the
+# user knows the next concrete step before they open the app and wonder why
+# nothing's loading.
+#
+# We deliberately do NOT install Homebrew or run `gh auth login` ourselves:
+#   - Installing brew unprompted is too invasive for a curl|bash flow.
+#   - `gh auth login` is interactive and opens a browser — chaining it inside
+#     the install script means the script blocks indefinitely waiting for the
+#     user to finish auth in another window. Better to print the command and
+#     let the user run it deliberately.
+
+GH_STATUS_LINE=""
+if ! command -v gh >/dev/null 2>&1; then
+    GH_STATUS_LINE="${RED}✗${RESET} ${BOLD}gh is not installed${RESET} — install it before opening GitPilot:
+      ${DIM}brew install gh && gh auth login${RESET}
+    (or grab a binary from https://cli.github.com/)"
+elif ! gh auth status >/dev/null 2>&1; then
+    GH_STATUS_LINE="${RED}✗${RESET} ${BOLD}gh is installed but not authenticated${RESET} — log in before opening GitPilot:
+      ${DIM}gh auth login${RESET}"
+else
+    # gh auth status prints "Logged in to github.com account <name>" — pluck
+    # the account name out for a friendlier confirmation. Falls back gracefully
+    # if the format ever changes.
+    GH_USER="$(gh auth status 2>&1 | sed -n 's/.*account \([^ ]*\).*/\1/p' | head -1)"
+    if [[ -n "$GH_USER" ]]; then
+        GH_STATUS_LINE="${GREEN}✓${RESET} gh authenticated as ${BOLD}$GH_USER${RESET}"
+    else
+        GH_STATUS_LINE="${GREEN}✓${RESET} gh authenticated"
+    fi
+fi
+
 log "Launching $APP_NAME"
 open "$APP_PATH"
 
@@ -149,10 +183,11 @@ cat <<EOF
 
 ${GREEN}${BOLD}Installed: $APP_NAME $VERSION${RESET}
 
+GitHub CLI:
+    $GH_STATUS_LINE
+
 Next steps:
   - First launch will ask for notification permission — allow it.
-  - GitHub auth (one-time):
-      ${DIM}brew install gh && gh auth login${RESET}
   - Future updates install in-app via Sparkle. No more downloads.
 
 EOF

@@ -3,9 +3,19 @@ name: Release
 # Trigger when you publish a GitHub Release. The release's body becomes the
 # Sparkle update prompt's release-notes HTML, and its tag (e.g. v0.2.0)
 # becomes the version embedded in the bundle and appcast.
+#
+# workflow_dispatch is a manual fallback — useful if the release event was
+# missed (e.g. earlier workflow had a parse error and never fired) or if you
+# need to re-run the build for an existing tag without re-publishing.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)build, e.g. v0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: write  # needed to push the updated appcast.xml back to main
@@ -44,9 +54,12 @@ jobs:
         # ship a v<TAG> bundle containing different code than the tag —
         # silently wrong. The appcast-commit step below explicitly switches
         # to main when it's time to write back.
+        #
+        # tag_name is empty on workflow_dispatch (no release context); inputs.tag
+        # fills in. The `||` operator returns the first non-empty operand.
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
           fetch-depth: 0
 
       - name: Select Xcode
@@ -66,7 +79,7 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           # CFBundleVersion is monotonic — use the GitHub run number so it always
           # increases across releases (Sparkle compares this to detect updates).
@@ -100,8 +113,8 @@ jobs:
           # sign_update reads the private key from stdin when given - as path.
           SIG_LINE="$("$SPARKLE_DIR/bin/sign_update" --ed-key-file - "$ZIP" <<<"$SPARKLE_ED_PRIVATE_KEY")"
           # Multi-line/quote-bearing values must be passed via env (and read
-          # from env in the consuming step) — never via direct ${{}} expansion
-          # in shell strings, which is shell-injection-vulnerable.
+          # from env in the consuming step) — never via direct expression
+          # interpolation in shell strings (shell-injection-vulnerable).
           {
             echo "signature_line<<EOF_SIG"
             printf '%s\n' "$SIG_LINE"
@@ -111,17 +124,16 @@ jobs:
 
       - name: Render release notes (Markdown → HTML via GitHub API)
         id: notes
+        # Pull the body via `gh release view` rather than reading the event
+        # payload — works for both `release: published` and workflow_dispatch
+        # triggers (the latter has no release event payload).
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Read the body from the event payload via jq rather than YAML
-          # interpolation. The release body can contain quotes, newlines, and
-          # YAML-significant characters — interpolating it directly into a
-          # `BODY: ${{ ... }}` field can break the workflow before the runner
-          # sees it.
-          EVENT_PATH: ${{ github.event_path }}
-          RELEASE_URL: ${{ github.event.release.html_url }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
-          BODY="$(jq -r '.release.body // ""' "$EVENT_PATH")"
+          BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null || true)"
+          RELEASE_URL="$(gh release view "$TAG" --repo "$REPO" --json url --jq .url 2>/dev/null || true)"
           if [[ -n "$BODY" ]]; then
             HTML="$(jq -nc --arg text "$BODY" --arg mode gfm '{text:$text, mode:$mode}' \
                     | gh api -X POST /markdown --input -)"

@@ -6,19 +6,34 @@
     <description>Most recent GitPilot updates</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.2</title>
+      <pubDate>Sat, 09 May 2026 05:46:40 +0000</pubDate>
+      <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+      <sparkle:version>8</sparkle:version>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.1...v0.1.2">0.1.2</a> (2026-05-09)</h2>
+<h3>Bug Fixes</h3>
+<ul>
+<li>Settings caption text spans full width (<a href="https://github.com/benjamingarcia10/GitPilot/commit/c819505b2f4197140d340b515d1b8b30fee7fabf">c819505</a>)</li>
+<li>subprocesses inherit Homebrew PATH after Sparkle relaunch (<a href="https://github.com/benjamingarcia10/GitPilot/commit/6813317c26cda9dbc37937cca5cc5e1444d5dbb7">6813317</a>)</li>
+<li>valid release-please draft key + PAT for downstream trigger (<a href="https://github.com/benjamingarcia10/GitPilot/commit/c56596f241baa190df574c1d7f03e9b1c08a16eb">c56596f</a>)</li>
+</ul>]]></description>
+      <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.2/GitPilot-0.1.2-arm64.zip" length="2166965" type="application/octet-stream" sparkle:edSignature="vP0Rp16WwklTOcvTMY9Qa16pm2wKUVCZ3v7LDg+E33f2bE7pGfElHsug6MX+Ibm4bmCdMgYg5dJULrF52U4DBQ==" />
+    </item>
+    <item>
       <title>Version 0.1.1</title>
       <pubDate>Fri, 08 May 2026 23:59:44 +0000</pubDate>
       <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
       <sparkle:version>7</sparkle:version>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.0...v0.1.1">0.1.1</a> (2026-05-08)</h2>
-<h3>Bug Fixes</h3>
-<ul>
-<li>detect arm64 hardware via sysctl, not uname -m (<a href="https://github.com/benjamingarcia10/GitPilot/commit/4fe360299ab24d8039f54bb9fd6ff2e2ac52c7af">4fe3602</a>)</li>
-<li>hide CFBundleVersion from Settings, expose on hover (<a href="https://github.com/benjamingarcia10/GitPilot/commit/a6e3b6490323990c74c3ed7838994349a444ad6b">a6e3b64</a>)</li>
-<li>release.yml parse error blocked release event from firing (<a href="https://github.com/benjamingarcia10/GitPilot/commit/50f268ac664671026ec964b8a8968028011fa10f">50f268a</a>)</li>
-<li>Settings footer text now spans full section width (<a href="https://github.com/benjamingarcia10/GitPilot/commit/4ef5abaa4c4d5b7c7f107883d800ad0e882ec203">4ef5aba</a>)</li>
-</ul>]]></description>
+      <description>&lt;h2&gt;&lt;a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.0...v0.1.1"&gt;0.1.1&lt;/a&gt; (2026-05-08)&lt;/h2&gt;
+&lt;h3&gt;Bug Fixes&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;detect arm64 hardware via sysctl, not uname -m (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/4fe360299ab24d8039f54bb9fd6ff2e2ac52c7af"&gt;4fe3602&lt;/a&gt;)&lt;/li&gt;
+&lt;li&gt;hide CFBundleVersion from Settings, expose on hover (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/a6e3b6490323990c74c3ed7838994349a444ad6b"&gt;a6e3b64&lt;/a&gt;)&lt;/li&gt;
+&lt;li&gt;release.yml parse error blocked release event from firing (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/50f268ac664671026ec964b8a8968028011fa10f"&gt;50f268a&lt;/a&gt;)&lt;/li&gt;
+&lt;li&gt;Settings footer text now spans full section width (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/4ef5abaa4c4d5b7c7f107883d800ad0e882ec203"&gt;4ef5aba&lt;/a&gt;)&lt;/li&gt;
+&lt;/ul&gt;</description>
       <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.1/GitPilot-0.1.1-arm64.zip" length="2165384" type="application/octet-stream" sparkle:edSignature="3NYPEu1pMxKWnBzarRO2782wqWeHyC+SXNwbuZh5ZtEddHVLSbNBcn9JUwA6tiKhtZGy6w5fulnvN5wj1veYBQ==" />
     </item>
     <item>

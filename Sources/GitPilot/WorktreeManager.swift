@@ -117,6 +117,7 @@ enum WorktreeManager {
         // Run as a subprocess. Editors usually accept a directory as the first arg.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.useAugmentedPATH()
         proc.arguments = [resolved, path.path]
         do {
             try proc.run()
@@ -150,6 +151,7 @@ enum WorktreeManager {
     private static func commandExists(_ command: String) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        proc.useAugmentedPATH()
         proc.arguments = [command]
         proc.standardOutput = Pipe()
         proc.standardError = Pipe()
@@ -170,6 +172,7 @@ enum WorktreeManager {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            proc.useAugmentedPATH()
             proc.arguments = ["git", "-C", repoPath.path] + args
             let out = Pipe()
             let err = Pipe()

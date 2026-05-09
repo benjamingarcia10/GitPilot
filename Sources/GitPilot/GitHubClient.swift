@@ -218,6 +218,7 @@ actor GitHubClient {
     private func runGH(args: [String]) throws -> String {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.useAugmentedPATH()
         proc.arguments = ["gh"] + args
         let out = Pipe()
         let err = Pipe()

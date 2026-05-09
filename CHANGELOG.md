@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.2](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.1...v0.1.2) (2026-05-09)
+
+
+### Bug Fixes
+
+* Settings caption text spans full width ([c819505](https://github.com/benjamingarcia10/GitPilot/commit/c819505b2f4197140d340b515d1b8b30fee7fabf))
+* subprocesses inherit Homebrew PATH after Sparkle relaunch ([6813317](https://github.com/benjamingarcia10/GitPilot/commit/6813317c26cda9dbc37937cca5cc5e1444d5dbb7))
+* valid release-please draft key + PAT for downstream trigger ([c56596f](https://github.com/benjamingarcia10/GitPilot/commit/c56596f241baa190df574c1d7f03e9b1c08a16eb))
+
 ## [0.1.1](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.0...v0.1.1) (2026-05-08)
 
 

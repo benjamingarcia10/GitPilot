@@ -955,11 +955,19 @@ final class AppState: ObservableObject {
         do {
             try await client.updateBranch(prNodeId: pr.nodeId, method: .rebase)
             record(.rebased, pr: pr)
-            // Same delayed-refresh pattern as auto-rebase: button taps usually
-            // run outside the refresh chain so a direct `await refresh()` would
-            // work, but coupling the two paths means there's only one race
-            // window to reason about and the sleep doesn't block button UX.
-            scheduleDelayedRefresh()
+            // Hold the button at "Rebasing…" through GitHub's mergeStateStatus
+            // recompute and the post-mutation refresh — otherwise the flag
+            // clears here and the button flickers back to "Rebase" before the
+            // refreshed PR state hides it, inviting duplicate clicks. 5s is a
+            // best-effort window; the recompute time isn't deterministic, but
+            // a wider sleep makes the flicker rare in practice.
+            // Drain any in-flight refresh first so our explicit refresh() isn't
+            // no-op'd by the isRefreshing guard.
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            while monitor.isRefreshing {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            await monitor.refresh()
         } catch {
             // Surface the failure in activity so the user can see why nothing
             // happened — the inline button just snapping back to "Rebase" with

@@ -119,14 +119,8 @@ final class PRMonitor: ObservableObject {
             Log.debug("phase1 returned \(lightPRs.count) PRs", elapsed: refreshStart)
 
             // Carry enrichment from the previous snapshot so rows don't flash to "loading".
-            let previousById = Dictionary(uniqueKeysWithValues: prs.map { ($0.id, $0) })
-            prs = lightPRs.map { fresh in
-                guard let prev = previousById[fresh.id] else { return fresh }
-                var merged = fresh
-                merged.carryForwardEnrichment(from: prev)
-                // allowedMergeMethods comes from the fresh phase-1 query, no carry-forward needed.
-                return merged
-            }
+            // allowedMergeMethods comes from the fresh phase-1 query, no carry-forward needed.
+            prs = PullRequest.mergePreservingEnrichment(fresh: lightPRs, previous: prs)
             lastError = nil
             lastRefresh = Date()
 

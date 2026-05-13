@@ -243,6 +243,15 @@ actor GitHubClient {
     /// would burn the rate limit each refresh. 1000 is generous for humans.
     private static let pageFetchCap = 1000
 
+    /// Stable dedup by PR id, first occurrence wins. Used after paginated fetches
+    /// because GitHub's search cursors can yield the same PR twice when a PR's
+    /// state changes mid-pagination — duplicates downstream crash the
+    /// `Dictionary(uniqueKeysWithValues:)` calls in AppState/PRMonitor.
+    private func dedupedByPRId(_ prs: [PullRequest]) -> [PullRequest] {
+        var seen = Set<String>()
+        return prs.filter { seen.insert($0.id).inserted }
+    }
+
     /// Phase 1: lightweight list via `viewer.pullRequests` — a direct association lookup,
     /// faster than going through the search index. Excludes mergeStateStatus/mergeable/
     /// reviewDecision because GitHub computes those lazily and they can be slow.
@@ -361,8 +370,14 @@ actor GitHubClient {
         if all.count >= Self.pageFetchCap {
             Log.warn("fetchMyOpenPRs hit cap of \(Self.pageFetchCap) — older PRs are not loaded")
         }
-        Log.debug("phase1 fetchMyOpenPRs returned \(all.count) PRs", elapsed: t0)
-        return all
+        // Defense against pagination duplicates — same hazard as fetchReviewingPRs;
+        // hasn't been seen in crash logs here, but the failure mode is identical.
+        let deduped = dedupedByPRId(all)
+        if deduped.count != all.count {
+            Log.debug("fetchMyOpenPRs dropped \(all.count - deduped.count) duplicate(s)")
+        }
+        Log.debug("phase1 fetchMyOpenPRs returned \(deduped.count) PRs", elapsed: t0)
+        return deduped
     }
 
     /// Fetches PRs where the viewer is requested as a reviewer — directly OR via
@@ -512,8 +527,15 @@ actor GitHubClient {
         if all.count >= Self.pageFetchCap {
             Log.warn("fetchReviewingPRs hit cap of \(Self.pageFetchCap) — older PRs are not loaded")
         }
-        Log.debug("fetchReviewingPRs returned \(all.count) PRs", elapsed: t0)
-        return all
+        // GitHub's search cursors aren't stable across mutations — a PR whose state
+        // changes mid-pagination can land on two adjacent pages. Duplicate ids then
+        // crash Dictionary(uniqueKeysWithValues:) on the next refresh.
+        let deduped = dedupedByPRId(all)
+        if deduped.count != all.count {
+            Log.debug("fetchReviewingPRs dropped \(all.count - deduped.count) duplicate(s)")
+        }
+        Log.debug("fetchReviewingPRs returned \(deduped.count) PRs", elapsed: t0)
+        return deduped
     }
 
     /// Phase 2: batched enrichment via `nodes(ids:)`. Replaces the previous per-PR

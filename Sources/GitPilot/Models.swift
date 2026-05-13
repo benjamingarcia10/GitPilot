@@ -222,4 +222,18 @@ extension PullRequest {
         checkRollupState = old.checkRollupState
         checks = old.checks
     }
+
+    /// Merge a freshly-fetched list with the previous snapshot, carrying per-PR
+    /// enrichment forward so rows don't flash to "loading" between refreshes.
+    /// Last-wins on the previous list defends against duplicate ids (GitHub's
+    /// paginator can yield the same PR twice when state changes mid-fetch).
+    static func mergePreservingEnrichment(fresh: [PullRequest], previous: [PullRequest]) -> [PullRequest] {
+        let prevById = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        return fresh.map { f in
+            guard let prev = prevById[f.id] else { return f }
+            var merged = f
+            merged.carryForwardEnrichment(from: prev)
+            return merged
+        }
+    }
 }

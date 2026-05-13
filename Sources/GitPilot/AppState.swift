@@ -547,13 +547,7 @@ final class AppState: ObservableObject {
             reviewingLastError = nil
             // Carry forward enrichment from the previous snapshot so rows don't
             // flash to "loading" while phase-2 fetches in the background.
-            let previousById = Dictionary(uniqueKeysWithValues: reviewingPRs.map { ($0.id, $0) })
-            reviewingPRs = prs.map { fresh -> PullRequest in
-                guard let prev = previousById[fresh.id] else { return fresh }
-                var merged = fresh
-                merged.carryForwardEnrichment(from: prev)
-                return merged
-            }
+            reviewingPRs = PullRequest.mergePreservingEnrichment(fresh: prs, previous: reviewingPRs)
             // Batched enrichment: one GraphQL call (chunked to 25 if needed)
             // replaces the per-PR fan-out. Lookup is by `prId` (not array index)
             // so concurrent edits to reviewingPRs don't corrupt the apply.
@@ -754,7 +748,7 @@ final class AppState: ObservableObject {
     private var lastSeenPRsById: [String: PullRequest] = [:]
 
     private func recordListChurn(liveIds: Set<String>) {
-        let currentPRs = Dictionary(uniqueKeysWithValues: monitor.prs.map { ($0.id, $0) })
+        let currentPRs = Dictionary(monitor.prs.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         defer {
             firstListSettleSeen = true
             lastSeenPRsById = currentPRs

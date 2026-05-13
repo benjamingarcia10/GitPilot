@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.2...v0.1.3) (2026-05-13)
+
+
+### Bug Fixes
+
+* dedupe paginated PR lists to prevent Dictionary crash ([0fb631c](https://github.com/benjamingarcia10/GitPilot/commit/0fb631ce4b619e9ef328e097f4b6cf2694cdc77e))
+* drop pin entries when PRs disappear from the list ([8d99a44](https://github.com/benjamingarcia10/GitPilot/commit/8d99a444d2f69361eb888bd50f25a7c083306935))
+* hold Rebase button in "Rebasing…" through post-mutation refresh ([c290142](https://github.com/benjamingarcia10/GitPilot/commit/c2901423ea7293b7b67fa084db14013f01ea0356))
+
 ## [0.1.2](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.1...v0.1.2) (2026-05-09)
 
 

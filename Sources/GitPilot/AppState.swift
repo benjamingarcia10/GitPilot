@@ -778,7 +778,9 @@ final class AppState: ObservableObject {
     }
 
     /// Drop dedupe entries for PRs that no longer appear in the list (closed/merged).
-    /// Pin/snooze/autoRebase entries are intentionally preserved across close-and-reopen.
+    /// Pins are also dropped — a merged/closed PR isn't coming back as the same row,
+    /// and leaving the pin behind silently shrinks the "Only show pinned" view to
+    /// empty. Snooze/autoRebase entries are still preserved across close-and-reopen.
     /// Also prunes the ephemeral expanded-row set so it doesn't grow unboundedly
     /// over a long session.
     private func cleanDedupeForClosedPRs(liveIds: Set<String>) {
@@ -790,12 +792,17 @@ final class AppState: ObservableObject {
                           persistedState.notifiedBlockedByTests).union(
                           persistedState.notifiedConflicts)
             .subtracting(liveIds)
-        if !staleKeys.isEmpty {
+        let stalePins = persistedState.pinned.subtracting(liveIds)
+        if !staleKeys.isEmpty || !stalePins.isEmpty {
             mutate { s in
                 s.notifiedNeedsUpdate.subtract(staleKeys)
                 s.notifiedReadyToMerge.subtract(staleKeys)
                 s.notifiedBlockedByTests.subtract(staleKeys)
                 s.notifiedConflicts.subtract(staleKeys)
+                s.pinned.subtract(stalePins)
+                // Mirror unpinAll: with no pins left, the toggle would just
+                // produce a stale "show nothing" view, so flip it off.
+                if s.pinned.isEmpty { s.showPinnedOnly = false }
             }
         }
         expandedPRs.formIntersection(liveIds.union(reviewingPRs.map(\.id)))

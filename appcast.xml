@@ -6,18 +6,33 @@
     <description>Most recent GitPilot updates</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.3</title>
+      <pubDate>Wed, 13 May 2026 21:32:34 +0000</pubDate>
+      <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
+      <sparkle:version>10</sparkle:version>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.2...v0.1.3">0.1.3</a> (2026-05-13)</h2>
+<h3>Bug Fixes</h3>
+<ul>
+<li>dedupe paginated PR lists to prevent Dictionary crash (<a href="https://github.com/benjamingarcia10/GitPilot/commit/0fb631ce4b619e9ef328e097f4b6cf2694cdc77e">0fb631c</a>)</li>
+<li>drop pin entries when PRs disappear from the list (<a href="https://github.com/benjamingarcia10/GitPilot/commit/8d99a444d2f69361eb888bd50f25a7c083306935">8d99a44</a>)</li>
+<li>hold Rebase button in "Rebasing…" through post-mutation refresh (<a href="https://github.com/benjamingarcia10/GitPilot/commit/c2901423ea7293b7b67fa084db14013f01ea0356">c290142</a>)</li>
+</ul>]]></description>
+      <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.3/GitPilot-0.1.3-arm64.zip" length="2168077" type="application/octet-stream" sparkle:edSignature="sTkl3GrVgZOB9I7yKXvVYdo4yWb4a1jDtkBOjigi6atG4B9uKsDnqid0LrR6kUijOS2Y5FeBorAW92X5nKFmDw==" />
+    </item>
+    <item>
       <title>Version 0.1.2</title>
       <pubDate>Sat, 09 May 2026 05:46:40 +0000</pubDate>
       <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
       <sparkle:version>8</sparkle:version>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.1...v0.1.2">0.1.2</a> (2026-05-09)</h2>
-<h3>Bug Fixes</h3>
-<ul>
-<li>Settings caption text spans full width (<a href="https://github.com/benjamingarcia10/GitPilot/commit/c819505b2f4197140d340b515d1b8b30fee7fabf">c819505</a>)</li>
-<li>subprocesses inherit Homebrew PATH after Sparkle relaunch (<a href="https://github.com/benjamingarcia10/GitPilot/commit/6813317c26cda9dbc37937cca5cc5e1444d5dbb7">6813317</a>)</li>
-<li>valid release-please draft key + PAT for downstream trigger (<a href="https://github.com/benjamingarcia10/GitPilot/commit/c56596f241baa190df574c1d7f03e9b1c08a16eb">c56596f</a>)</li>
-</ul>]]></description>
+      <description>&lt;h2&gt;&lt;a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.1...v0.1.2"&gt;0.1.2&lt;/a&gt; (2026-05-09)&lt;/h2&gt;
+&lt;h3&gt;Bug Fixes&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;Settings caption text spans full width (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/c819505b2f4197140d340b515d1b8b30fee7fabf"&gt;c819505&lt;/a&gt;)&lt;/li&gt;
+&lt;li&gt;subprocesses inherit Homebrew PATH after Sparkle relaunch (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/6813317c26cda9dbc37937cca5cc5e1444d5dbb7"&gt;6813317&lt;/a&gt;)&lt;/li&gt;
+&lt;li&gt;valid release-please draft key + PAT for downstream trigger (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/c56596f241baa190df574c1d7f03e9b1c08a16eb"&gt;c56596f&lt;/a&gt;)&lt;/li&gt;
+&lt;/ul&gt;</description>
       <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.1.2/GitPilot-0.1.2-arm64.zip" length="2166965" type="application/octet-stream" sparkle:edSignature="vP0Rp16WwklTOcvTMY9Qa16pm2wKUVCZ3v7LDg+E33f2bE7pGfElHsug6MX+Ibm4bmCdMgYg5dJULrF52U4DBQ==" />
     </item>
     <item>

@@ -363,16 +363,29 @@ private struct NotificationsDeniedBanner: View {
 ///     hidden controller SwiftUI installs for `showSettingsWindow:`. The
 ///     action lands on no one and nothing happens.
 ///   - macOS 14 introduced `SettingsLink`, which SwiftUI implements to handle
-///     this case correctly. We use it when available.
+///     this case correctly. It is the only reliable way to open the Settings
+///     scene from a MenuBarExtra(.window) on macOS 14+; the legacy selector
+///     path no longer reaches a handler there even with async dispatch.
 ///   - On macOS 13 we fall back to dispatching the legacy selector
 ///     asynchronously so it runs *after* the popover has dismissed and the
 ///     responder chain has been re-rooted on the application.
+///
+/// On top of the open path we layer post-open activation: when the Settings
+/// window already exists on another Space or behind other apps' windows, just
+/// triggering the open does nothing visible. We follow up by activating the
+/// app and pulling the window to the active Space + front.
 struct OpenSettingsButton<Label: View>: View {
     @ViewBuilder let label: () -> Label
 
     var body: some View {
         if #available(macOS 14.0, *) {
+            // SettingsLink doesn't expose a completion hook, so we piggyback on
+            // the same tap via simultaneousGesture. TapGesture is non-exclusive,
+            // so the SettingsLink's own action still fires.
             SettingsLink(label: label)
+                .simultaneousGesture(TapGesture().onEnded {
+                    Self.scheduleBringSettingsWindowFront()
+                })
         } else {
             Button(action: Self.openLegacy, label: label)
         }
@@ -380,11 +393,60 @@ struct OpenSettingsButton<Label: View>: View {
 
     private static func openLegacy() {
         NSApp.activate(ignoringOtherApps: true)
-        // Defer until the popover dismisses — see comment above for why.
+        // Defer until the popover dismisses — see top comment for why.
         DispatchQueue.main.async {
-            if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            let opened = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                || NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            guard opened else { return }
+            scheduleBringSettingsWindowFront()
+        }
+    }
+
+    /// Wait for SwiftUI to instantiate the Settings window, then pull it
+    /// forward. On a cold first click the window doesn't exist yet, and SwiftUI
+    /// may take more than one runloop turn to materialize it — retry briefly
+    /// rather than silently no-op.
+    private static func scheduleBringSettingsWindowFront(retriesLeft: Int = 5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if NSApp.windows.contains(where: isSettingsWindow) {
+                bringSettingsWindowFront()
+            } else if retriesLeft > 0 {
+                scheduleBringSettingsWindowFront(retriesLeft: retriesLeft - 1)
             }
         }
+    }
+
+    /// Pull the Settings window to the current Space and order it to the front.
+    /// Without this, the window may stay on whichever Space it was last shown
+    /// on, or hide behind another app's windows — clicking the button would
+    /// look like nothing happened.
+    private static func bringSettingsWindowFront() {
+        NSApp.activate(ignoringOtherApps: true)
+        for window in NSApp.windows where isSettingsWindow(window) {
+            // `.moveToActiveSpace` permanently changes the window's Space
+            // behavior — from this point on, Settings follows the user instead
+            // of sitting on whichever Space it was first shown on. Intentional:
+            // it's the behavior a user expects from a settings window.
+            window.collectionBehavior.insert(.moveToActiveSpace)
+            // If the user previously minimized the window (Cmd+M / yellow dot),
+            // makeKeyAndOrderFront alone won't restore it.
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Heuristic: SwiftUI's Settings scene installs a regular NSWindow (not a
+    /// panel), separate from the MenuBarExtra status-bar panel. Filtering by
+    /// class name is fragile but the alternatives (title matching, identifier)
+    /// are also private-API surface. We pick by elimination.
+    private static func isSettingsWindow(_ window: NSWindow) -> Bool {
+        guard window.canBecomeKey else { return false }
+        let cls = String(describing: type(of: window))
+        // MenuBarExtra's hosting panel and any status-bar overlays are not it.
+        if cls.contains("StatusBar") || cls.contains("MenuBarExtra") { return false }
+        // Panels (notifications, popovers) are not it.
+        if window is NSPanel { return false }
+        return true
     }
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.3...v0.2.0) (2026-05-15)
+
+
+### Features
+
+* pull Settings window to active Space + front on open ([90789b5](https://github.com/benjamingarcia10/GitPilot/commit/90789b55507a2f32e5b7051118cc4fcb3b6fa503))
+
 ## [0.1.3](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.2...v0.1.3) (2026-05-13)
 
 

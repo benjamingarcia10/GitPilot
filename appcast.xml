@@ -6,16 +6,33 @@
     <description>Most recent GitPilot updates</description>
     <language>en</language>
     <item>
+      <title>Version 0.3.0</title>
+      <pubDate>Thu, 28 May 2026 23:11:22 +0000</pubDate>
+      <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.2.0...v0.3.0">0.3.0</a> (2026-05-28)</h2>
+<h3>Features</h3>
+<ul>
+<li>notify when GitHub auth fails and PR tracking pauses (<a href="https://github.com/benjamingarcia10/GitPilot/commit/9a0e60086ef9c8edf8c2099631a41593d53edecd">9a0e600</a>)</li>
+</ul>
+<h3>Bug Fixes</h3>
+<ul>
+<li>retry GraphQL once with a fresh gh token on 401 (<a href="https://github.com/benjamingarcia10/GitPilot/commit/796a3ce37bcbf3076fefe01776d929e5d38d57ff">796a3ce</a>)</li>
+</ul>]]></description>
+      <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.3.0/GitPilot-0.3.0-arm64.zip" length="2174086" type="application/octet-stream" sparkle:edSignature="PudnjMRJw5WKXVSl6kXGb18H7zhM4TLCcvQIiHrJojZk81koYNpLUw+JqIcLhR8ledaur4MamdGNWg01wieqAQ==" />
+    </item>
+    <item>
       <title>Version 0.2.0</title>
       <pubDate>Mon, 18 May 2026 18:21:25 +0000</pubDate>
       <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
       <sparkle:version>11</sparkle:version>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h2><a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.3...v0.2.0">0.2.0</a> (2026-05-15)</h2>
-<h3>Features</h3>
-<ul>
-<li>pull Settings window to active Space + front on open (<a href="https://github.com/benjamingarcia10/GitPilot/commit/90789b55507a2f32e5b7051118cc4fcb3b6fa503">90789b5</a>)</li>
-</ul>]]></description>
+      <description>&lt;h2&gt;&lt;a href="https://github.com/benjamingarcia10/GitPilot/compare/v0.1.3...v0.2.0"&gt;0.2.0&lt;/a&gt; (2026-05-15)&lt;/h2&gt;
+&lt;h3&gt;Features&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;pull Settings window to active Space + front on open (&lt;a href="https://github.com/benjamingarcia10/GitPilot/commit/90789b55507a2f32e5b7051118cc4fcb3b6fa503"&gt;90789b5&lt;/a&gt;)&lt;/li&gt;
+&lt;/ul&gt;</description>
       <enclosure url="https://github.com/benjamingarcia10/GitPilot/releases/download/v0.2.0/GitPilot-0.2.0-arm64.zip" length="2171032" type="application/octet-stream" sparkle:edSignature="+vaibDP3UfBj+v1fRvUcJtOI9KEPzQvfmEvJg2i2sZOtEs4AKR4MziaOmTG6tBPamO8WF1xvRE3CwCTLrl0dBQ==" />
     </item>
     <item>

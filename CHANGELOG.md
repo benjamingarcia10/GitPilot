@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/benjamingarcia10/GitPilot/compare/v0.2.0...v0.3.0) (2026-05-28)
+
+
+### Features
+
+* notify when GitHub auth fails and PR tracking pauses ([9a0e600](https://github.com/benjamingarcia10/GitPilot/commit/9a0e60086ef9c8edf8c2099631a41593d53edecd))
+
+
+### Bug Fixes
+
+* retry GraphQL once with a fresh gh token on 401 ([796a3ce](https://github.com/benjamingarcia10/GitPilot/commit/796a3ce37bcbf3076fefe01776d929e5d38d57ff))
+
 ## [0.2.0](https://github.com/benjamingarcia10/GitPilot/compare/v0.1.3...v0.2.0) (2026-05-15)
 
 

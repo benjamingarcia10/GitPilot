@@ -224,11 +224,18 @@ final class AppState: ObservableObject {
     /// either polling loop. Also clears team-slug cache so a re-auth as a
     /// different account doesn't reuse the previous user's team filter.
     private func applyAuthFailure(_ reason: String) {
+        // Edge-triggered: only notify on the transition *into* needs-reauth, not
+        // on every failed poll/retry while already in that state. Mirrors the
+        // app's one-fire-per-transition notification policy.
+        let alreadyFailed: Bool = { if case .needsReauth = authStatus { return true }; return false }()
         authStatus = .needsReauth(reason: reason)
         monitor.stop()
         stopReviewingPolling()
         viewerTeamSlugs.removeAll()
         teamSlugsLastRefreshed = nil
+        if !alreadyFailed {
+            Task { await notifications.notifyAuthFailure(reason: reason) }
+        }
     }
 
     // MARK: - Persisted-state mutation helpers

@@ -12,6 +12,7 @@ enum NotificationCategory {
     static let manualRebaseFailed = "GP_MANUAL_REBASE_FAILED"
     static let worktreeFailed = "GP_WORKTREE_FAILED"
     static let conflicts = "GP_CONFLICTS"
+    static let authFailed = "GP_AUTH_FAILED"
 }
 
 enum NotificationAction {
@@ -140,10 +141,19 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
             options: []
         )
 
+        // No action buttons — there's nothing GitPilot can do from a button to
+        // re-auth; the user has to run `gh auth login`. Tapping just dismisses.
+        let authFailed = UNNotificationCategory(
+            identifier: NotificationCategory.authFailed,
+            actions: [],
+            intentIdentifiers: [],
+            options: []
+        )
+
         center.setNotificationCategories([
             needsUpdate, readyToMerge, testsFailing,
             autoRebaseFailed, autoMergeFailed, autoMergeCompleted,
-            manualRebaseFailed, worktreeFailed, conflicts,
+            manualRebaseFailed, worktreeFailed, conflicts, authFailed,
         ])
     }
 
@@ -244,6 +254,20 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
             body: "\(pr.title)\n\(reason)",
             category: NotificationCategory.worktreeFailed
         )
+    }
+
+    /// Not PR-scoped, so it can't use the `notify` helper. Fired edge-triggered
+    /// by AppState when auth transitions into needs-reauth, so the user learns
+    /// PR tracking has stopped without having to open the popover.
+    func notifyAuthFailure(reason: String) async {
+        let content = UNMutableNotificationContent()
+        content.title = "GitHub sign-in required"
+        content.subtitle = "PR tracking is paused"
+        content.body = "\(reason)\nRun `gh auth login`, then reopen GitPilot."
+        content.categoryIdentifier = NotificationCategory.authFailed
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "auth-failed", content: content, trigger: nil)
+        do { try await center.add(req) } catch { Log.warn("Notification add failed: \(error.localizedDescription)") }
     }
 
     /// Single scheduling entry — every notify* method routes through this so

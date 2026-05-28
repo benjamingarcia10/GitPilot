@@ -879,22 +879,21 @@ actor GitHubClient {
     /// something useful. Each call site decodes the `data` envelope itself
     /// because each query has its own response shape.
     private func graphQLRaw(payload: [String: Any]) async throws -> Data {
-        var req = URLRequest(url: URL(string: "https://api.github.com/graphql")!)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(try token())", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw GitHubClientError.requestFailed(-1, "no http response")
-        }
-        if http.statusCode == 401 {
-            // Cached token is stale; drop it so the next attempt re-reads from gh.
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        // gh rotates/refreshes its stored token underneath us, and we cache the
+        // token for the process lifetime — so a cached copy can go stale and the
+        // first request 401s. Drop the cache and retry once with a freshly-read
+        // token before treating it as a real auth failure. Only a second 401
+        // (gh genuinely logged out) reaches the user as needs-reauth.
+        var (data, status) = try await sendGraphQL(body: body)
+        if status == 401 {
             invalidateAuth()
+            (data, status) = try await sendGraphQL(body: body)
         }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw GitHubClientError.requestFailed(http.statusCode, body)
+        guard (200..<300).contains(status) else {
+            let bodyStr = String(data: data, encoding: .utf8) ?? ""
+            throw GitHubClientError.requestFailed(status, bodyStr)
         }
         // Peek for GraphQL-level errors. GitHub returns 200 for these with an
         // `errors` array, which would otherwise fail downstream decoding with a
@@ -908,6 +907,21 @@ actor GitHubClient {
             throw GitHubClientError.requestFailed(200, errors.map(\.message).joined(separator: "; "))
         }
         return data
+    }
+
+    /// One GraphQL round trip, returning the body and HTTP status. The caller
+    /// decides whether a 401 warrants a fresh-token retry.
+    private func sendGraphQL(body: Data) async throws -> (Data, Int) {
+        var req = URLRequest(url: URL(string: "https://api.github.com/graphql")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(try token())", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw GitHubClientError.requestFailed(-1, "no http response")
+        }
+        return (data, http.statusCode)
     }
 }
 
